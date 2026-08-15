@@ -1,0 +1,80 @@
+# Tooling config for the linker-loongarch toolchain (ruff + ty, strict).
+# ALL rules with documented ignores; every warn/ignore ty rule elevated
+# to error (verified against `ty explain rule` on 0.0.67).
+# Run: nix run .#lint  /  nix run .#typecheck
+
+[tool.ruff]
+line-length = 100
+target-version = "py314"
+
+[tool.ruff.lint]
+select = ["ALL"]
+ignore = [
+  # D: the modules carry article-cited docstrings; per-class demands are noise.
+  "D",
+  # T201: print() IS the demo — every stage prints its traced output.
+  "T201",
+  # S101: asserts are the correctness harness. S603/PLW1510: invoking
+  # readelf/file is the validation story, with check=False by intent.
+  "S101", "S603", "PLW1510",
+  # TRY003/EM101/EM102: rich inline error messages are deliberate.
+  "TRY003", "EM101", "EM102",
+  # C901/PLR09xx: the codegen/decoder dispatchers are one big type-switch.
+  "C901", "PLR0911", "PLR0912", "PLR0913", "PLR0915", "PLR0917",
+  # COM812: ruff format owns trailing commas.
+  "COM812",
+  # PTH123: tempfile + pathlib mix is fine here.
+  "PTH123",
+  # ERA001/CPY001/EXE001: banner comments, no copyright policy, no shebang
+  # requirement for modules run via python3.
+  "ERA001", "CPY001", "EXE001",
+  # ANN*: annotations added on the public surface; full coverage is a
+  # separate pass. PLR2004: magic numbers are named where they matter.
+  "ANN001", "ANN201", "ANN202", "ANN204", "PLR2004",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# the suites are stdlib unittest: assertEqual/assertRaises are correct there
+# (PT is written for pytest); SLF001: tests compare via the private helper
+# on purpose; ANN002/PLC0415: test-local imports and helpers stay local.
+"test_*.py" = ["PT", "SLF001", "ANN002", "PLC0415", "I001", "SIM115", "PTH118", "PTH110", "E401", "RUF012"]
+
+[tool.ty]
+
+[tool.ty.environment]
+python-version = "3.14"
+
+[tool.ty.rules]
+# STRICT: ty has no --strict; elevate every warn/ignore rule to error
+# (verified against `ty explain rule` on 0.0.67).
+"ambiguous-protocol-member" = "error"
+"blanket-ignore-comment" = "error"
+"deprecated" = "error"
+"division-by-zero" = "error"
+"experimental-syntax" = "error"
+"ignore-comment-unknown-rule" = "error"
+"ineffective-final" = "error"
+"invalid-enum-member-annotation" = "error"
+"invalid-ignore-comment" = "error"
+"invalid-legacy-positional-parameter" = "error"
+"invalid-named-tuple-override" = "error"
+"mismatched-type-name" = "error"
+"missing-override-decorator" = "error"
+"missing-type-argument" = "error"
+"possibly-missing-attribute" = "error"
+"possibly-missing-implicit-call" = "error"
+"possibly-missing-import" = "error"
+"possibly-missing-submodule" = "error"
+"possibly-unresolved-reference" = "error"
+"pydantic-discarded-extra-argument" = "error"
+"redundant-cast" = "error"
+"redundant-final-classvar" = "error"
+"subclass-of-dataclass-with-order" = "error"
+"undefined-reveal" = "error"
+"unresolved-global" = "error"
+"unsupported-base" = "error"
+"unsupported-dynamic-base" = "error"
+"unused-awaitable" = "error"
+"unused-ignore-comment" = "error"
+"unused-type-ignore-comment" = "error"
+"useless-overload-body" = "error"
