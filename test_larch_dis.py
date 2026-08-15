@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """test_larch_dis.py — unittest suite for the LoongArch disassembler.
 
 Formatting per instruction family, branch-target symbol resolution,

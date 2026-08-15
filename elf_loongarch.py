@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
 """elf_loongarch: real ELF64-loongarch relocatable object (.o) I/O, stdlib only.
 
 Writes and reads REAL ET_REL ELF files for EM_LOONGARCH (258) — the same

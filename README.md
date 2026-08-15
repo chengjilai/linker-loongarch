@@ -78,3 +78,22 @@ relocatable files.
 - The linker reads the toy text format (or the bundled ELF reader), not
   arbitrary toolchain output; relaxation covers the canonical
   `pcalau12i`+`addi/ld` pairs lld relaxes.
+
+## License & acknowledgments
+
+Apache License 2.0 (see `LICENSE`). The code in this repository is
+original Python; no upstream source code is included.
+
+The implementation is grounded in, and cited against, these upstreams:
+
+- **LoongArch ELF ABI + ISA Volume 1** (Loongson) — relocation formulas
+  and instruction encodings, quoted as short fragments in the module
+  docstrings. The documents themselves are CC BY-NC-ND 4.0; that license
+  covers the documentation text, not the ISA or its implementations.
+- **lld** (LLVM, Apache-2.0) — the `R_LARCH_RELAX` pair-folding
+  transformation (`relaxPCHi20Lo12`) is modeled on its semantics.
+- **binutils** (GPLv3+) and **QEMU** (GPLv2) — consulted for functional
+  facts only: opcode constants, the 12-byte PLT stub, and bit-pattern
+  cross-checks. No code is derived from them.
+- **gABI** and Ian Lance Taylor's "Linkers" series — classic linker
+  semantics.

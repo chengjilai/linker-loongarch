@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
 """larch_dis: a disassembler for the LoongArch toolchain, on top of
 larch_emu.decode (which was parsed from the ISA Volume 1 and cross-checked
 against qemu's insns.decode).

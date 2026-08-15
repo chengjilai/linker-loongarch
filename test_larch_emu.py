@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
 """Tests for larch_emu.py -- LoongArch LA64 interpreter.
 
 Every instruction word below is hand-encoded from the bit layouts of the

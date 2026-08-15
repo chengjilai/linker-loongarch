@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """test_larch_asm.py — unittest suite for the LoongArch assembler.
 
 Every encoder is round-tripped through larch_emu.decode (an independent,

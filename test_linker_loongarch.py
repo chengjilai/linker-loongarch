@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """test_linker_loongarch.py — unittest suite for the LoongArch linker.
 
 Covers: object parsing, symbol resolution (dup/undef errors), every

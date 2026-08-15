@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
 """LoongArch (LA64, basic integer subset) single-cycle interpreter, pure Python.
 
 Part of a from-scratch LoongArch toolchain (assembler -> linker ->

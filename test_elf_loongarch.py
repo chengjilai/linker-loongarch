@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """test_elf_loongarch.py — unittest suite for the ELF64-loongarch .o I/O.
 
 Writer/reader round-trip for all three toolchain objects, ELF header

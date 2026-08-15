@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
 """larch_asm: a two-pass LoongArch (LA64) assembler, pure Python, stdlib only.
 
 Part of a from-scratch LoongArch toolchain (assembler -> linker ->

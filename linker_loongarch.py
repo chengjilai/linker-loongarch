@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
 """linker_loongarch.py: a small LoongArch static linker, pure Python, stdlib only.
 
 The linker half of a from-scratch LoongArch toolchain (assembler ->
