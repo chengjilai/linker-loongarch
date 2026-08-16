@@ -104,6 +104,37 @@ class TestHeader(unittest.TestCase):
                 self.assertIn(t, r.stdout)
 
 
+class TestAlignRoundTrip(unittest.TestCase):
+    ALIGN_OBJ = (
+        "SEC .text\n"
+        "00 00 40 03\n"  # one instruction
+        "00 00 40 03\n"
+        * 3  # .align 16 max run (12 NOPs)
+        + "00 00 40 03\n" * 7  # .align 32 max run (28 NOPs)
+        + "ALIGN .text 4 0x10 0\n"
+        "ALIGN .text 0x10 0x20 8\n"
+    )
+
+    def test_align_survives_round_trip(self):
+        with tempfile.TemporaryDirectory() as d:
+            obj = E.parse_object(self.ALIGN_OBJ, "align.obj")
+            p = os.path.join(d, "align.o")
+            E.write_object(obj, p)
+            rb = E.read_object(p)
+            self.assertEqual(rb.aligns, obj.aligns)
+            self.assertEqual(rb.sections, obj.sections)
+
+    def test_readelf_reports_align(self):
+        if not os.path.exists(READELF):
+            self.skipTest("readelf not available")
+        with tempfile.TemporaryDirectory() as d:
+            obj = E.parse_object(self.ALIGN_OBJ, "align.obj")
+            p = os.path.join(d, "align.o")
+            E.write_object(obj, p)
+            r = subprocess.run([READELF, "-r", p], capture_output=True, text=True)
+            self.assertIn("R_LARCH_ALIGN", r.stdout)
+
+
 class TestErrors(unittest.TestCase):
     def test_not_elf(self):
         with tempfile.TemporaryDirectory() as d:

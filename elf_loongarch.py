@@ -40,7 +40,7 @@ import tempfile
 
 import larch_asm
 import larch_emu
-from linker_loongarch import BASE, LinkError, Object, link, parse_object, verify
+from linker_loongarch import BASE, Align, LinkError, Object, link, parse_object, verify
 
 # ---------------------------------------------------------------------------
 # ELF64 constants
@@ -81,6 +81,7 @@ RELOC_NUM = {  # toy kind -> R_LARCH_* number (ABI table 2-17; verified)
     "GOT_PC_HI20": 75,
     "GOT_PC_LO12": 76,
     "RELAX": 100,
+    "R_LARCH_ALIGN": 102,
     "PCREL20_S2": 103,
 }
 RELOC_NAME = {v: k for k, v in RELOC_NUM.items()}
@@ -165,6 +166,17 @@ def write_object(obj: Object, path: str) -> None:
         if r is None:
             raise LinkError(f"write_object: no ELF reloc number for {kind}")
         relas.setdefault(sec, []).append(RELA.pack(roff, (sym_idx[sym] << 32) | r, 0))
+    for al in obj.aligns:
+        # r_symndx == 0: addend = alignment - 4 (binutils' no-max form).
+        # r_symndx  > 0: low byte = log2(alignment), high bytes = max NOPs.
+        if al.max_bytes == 0:
+            sym, addend = 0, al.align - 4
+        else:
+            sec_idx = next(i + 1 for i, (n, _) in enumerate(secs) if n == al.section)
+            sym, addend = sec_idx, (al.max_bytes << 8) | (al.align.bit_length() - 1)
+        relas.setdefault(al.section, []).append(
+            RELA.pack(al.offset, (sym << 32) | RELOC_NUM["R_LARCH_ALIGN"], addend)
+        )
     # --- layout --------------------------------------------------------------
     shdrs = []
     offset = EHDR.size
@@ -369,23 +381,33 @@ def read_object(path: str) -> Object:
             kind = "L" if bind == STB_LOCAL else ("W" if bind == STB_WEAK else "G")
             obj_syms[name] = (kind, shname(st_shndx), st_value, st_size)
 
-    # relocations
+    # relocations and R_LARCH_ALIGN requests
     relocs = []
+    aligns = []
     for shdr in shdrs:
         if shdr[1] != SHT_RELA:
             continue
         secname = shname(shdr[7])
         n = shdr[5] // RELA.size
         for j in range(n):
-            r_offset, r_info, _r_addend = RELA.unpack_from(data, shdr[4] + j * RELA.size)
+            r_offset, r_info, r_addend = RELA.unpack_from(data, shdr[4] + j * RELA.size)
             kind = RELOC_NAME.get(r_info & 0xFFFFFFFF)
             if kind is None:
                 raise ElfError(f"{path}: unsupported relocation type {r_info & 0xFFFFFFFF:#x}")
             si = (r_info >> 32) & 0xFFFFFFFF
+            if kind == "R_LARCH_ALIGN":
+                if si == 0:
+                    align, max_bytes = r_addend + 4, 0
+                else:
+                    align, max_bytes = 1 << (r_addend & 0xFF), r_addend >> 8
+                if align < 4 or align & (align - 1) or r_offset % 4:
+                    raise ElfError(f"{path}: bad R_LARCH_ALIGN at {secname}+{r_offset:#x}")
+                aligns.append(Align(secname, r_offset, align, max_bytes))
+                continue
             sym = None if (kind == "RELAX" or si == 0) else sym_name(syms[si][0])
             relocs.append((secname, r_offset, kind, sym))
 
-    return Object(path, sections, obj_syms, relocs, [])
+    return Object(path, sections, obj_syms, relocs, aligns)
 
 
 # ---------------------------------------------------------------------------
@@ -425,6 +447,7 @@ def main():
             assert read_back.sections == obj.sections, f"{name}: sections changed"
             assert read_back.symbols == expected_syms, f"{name}: symbols changed"
             assert read_back.relocs == obj.relocs, f"{name}: relocs changed"
+            assert read_back.aligns == obj.aligns, f"{name}: aligns changed"
             print("  read-back identical to the assembled object (+ UNDEF externals)")
 
         # validate with the real ELF tools when available
