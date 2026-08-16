@@ -13,10 +13,10 @@ import unittest
 import linker_loongarch as ll
 
 
-def link_texts(*texts, relax_log=None):
+def link_texts(*texts, relax_log=None, align_log=None):
     """Parse + link the given object texts; return (image, symaddr, layout)."""
     objects = [ll.parse_object(t, f"obj{i}") for i, t in enumerate(texts)]
-    return ll.link(objects, ll.BASE, relax_log=relax_log)
+    return ll.link(objects, ll.BASE, relax_log=relax_log, align_log=align_log)
 
 
 class TestParse(unittest.TestCase):
@@ -140,7 +140,8 @@ class TestRelaxation(unittest.TestCase):
         word = self._word(image, 0)
         self.assertEqual(word >> 25, 0x0C)  # pcaddi
         self.assertEqual(word & 0x1F, 4)  # same rd
-        self.assertEqual((word >> 5) & 0xFFFFF, 2)  # delta 8 >> 2
+        # x shifted with the fold (8 -> 4, the section end), so delta is 4
+        self.assertEqual((word >> 5) & 0xFFFFF, 1)
         self.assertEqual(self._word(image, 4), 0)  # the pair is gone
 
     def test_no_fold_without_relax(self):
@@ -334,6 +335,67 @@ class TestRelaxationTrace(unittest.TestCase):
         self.assertEqual(step.target, symaddr["f"])
         self.assertNotEqual(step.target, layout.got.get("f"))
         self.assertNotIn("f", layout.got)  # the slot died with the pair
+
+
+class TestAlignRelaxation(unittest.TestCase):
+    NOP = "00 00 40 03"
+
+    def test_excess_nops_are_deleted(self):
+        # 12 bytes of real code, then the assembler's 12-byte max NOP run.
+        # At BASE+0xc an align-16 request needs only 4 NOPs, so 8 die.
+        obj = "SEC .text\n" + f"{self.NOP}\n" * 3 + f"{self.NOP}\n" * 3 + "ALIGN .text 0xc 0x10 0\n"
+        image, _, layout = link_texts(obj)
+        self.assertEqual(len(image), 0x10)
+        self.assertEqual(layout.align_delta[("obj0", ".text")], [(16, 8)])
+        self.assertEqual(image[:16], bytes.fromhex("00004003" * 4))
+
+    def test_align_recomputed_after_pair_fold(self):
+        # A relaxable pair followed by .align 16 with max 8 NOPs.
+        # Pass 0: the unrelaxed pair leaves the ALIGN site at +8; it needs
+        # 8 NOPs, within max, so 4 are deleted.
+        # Pair fold shifts the ALIGN site to +4; now alignment would need
+        # 12 NOPs, above max, so the alignment is abandoned and all 12 die.
+        obj = (
+            "SEC .text\n04 00 00 1a\n84 00 c0 02\n" + f"{self.NOP}\n" * 3 + "SYM x G .text 8\n"
+            "REL .text 0 PCALA_HI20 x\n"
+            "REL .text 4 PCALA_LO12 x\n"
+            "REL .text 4 RELAX\n"
+            "ALIGN .text 8 0x10 8\n"
+        )
+        relax_log, align_log = [], []
+        image, symaddr, layout = link_texts(obj, relax_log=relax_log, align_log=align_log)
+        self.assertEqual(len(image), 0x10)
+        self.assertEqual(symaddr["x"], ll.BASE + 4)  # end of the folded section
+        self.assertEqual([s.decision for s in relax_log], ["fold"])
+        self.assertEqual(len(align_log), 2)
+        self.assertEqual(align_log[0].pass_no, 0)
+        self.assertFalse(align_log[0].abandoned)
+        self.assertEqual(align_log[0].needed, 8)
+        self.assertEqual(align_log[0].removed, 4)
+        self.assertEqual(align_log[1].pass_no, 1)
+        self.assertTrue(align_log[1].abandoned)
+        self.assertEqual(align_log[1].needed, 12)
+        self.assertEqual(align_log[1].removed, 12)
+        self.assertEqual(layout.align_delta[("obj0", ".text")], [(4, 12)])
+
+    def test_align_plan_shifts_following_relocations(self):
+        # A B26 at +12 must be patched at its shrunk address, not its
+        # object-relative offset; here align deletes 8 NOPs before it.
+        obj = (
+            "SEC .text\n" + f"{self.NOP}\n" * 3 + f"{self.NOP}\n" * 3 + "00 00 00 50\n"
+            "SYM there G .text 0x18\n"
+            "REL .text 0x18 B26 there\n"
+            "ALIGN .text 0xc 0x10 0\n"
+        )
+        image, symaddr, layout = link_texts(obj)
+        # section start + reloc offset 0x18 - deleted 8 = BASE + 0x10
+        site = ll.BASE + 0x10
+        self.assertEqual(layout.applied[-1][5], site)
+        # the branch target also shifts past the deleted NOPs
+        self.assertEqual(symaddr["there"], ll.BASE + 0x18 - 8)
+        disp = symaddr["there"] - site
+        word = int.from_bytes(image[site - ll.BASE : site - ll.BASE + 4], "little")
+        self.assertEqual((word >> 10) & 0xFFFF, (disp >> 2) & 0xFFFF)
 
 
 class TestEndToEnd(unittest.TestCase):

@@ -385,7 +385,7 @@ def read_object(path: str) -> Object:
             sym = None if (kind == "RELAX" or si == 0) else sym_name(syms[si][0])
             relocs.append((secname, r_offset, kind, sym))
 
-    return Object(path, sections, obj_syms, relocs)
+    return Object(path, sections, obj_syms, relocs, [])
 
 
 # ---------------------------------------------------------------------------

@@ -292,6 +292,7 @@ def assemble(src: str, name: str = "a.obj") -> str:
     globals_ = set()
     commons = []  # (name, size, align) in declaration order
     relocs = []  # (section, offset, kind, symbol)
+    aligns = []  # (section, offset, alignment bytes, max NOP bytes to keep)
     pending = None  # label awaiting a body
 
     def at():
@@ -338,10 +339,24 @@ def assemble(src: str, name: str = "a.obj") -> str:
             elif d == ".align":
                 define()
                 n = int(tok[1], 0)
-                pad = (1 << n) - (len(sections[at()]) % (1 << n))
-                if pad != 1 << n:
-                    filler = NOP.to_bytes(4, "little") if cur == ".text" else b"\x00"
-                    sections[at()].extend(filler * (pad // len(filler)))
+                align = 1 << n
+                if align < 4:
+                    raise AsmError(f"{where}: .align needs a byte alignment >= 4")
+                max_bytes = int(tok[2], 0) if len(tok) > 2 else 0
+                if cur == ".text":
+                    # R_LARCH_ALIGN input form: the assembler emits the full
+                    # maximum NOP run; the linker keeps only what the final
+                    # address needs and deletes the rest.
+                    if max_bytes % 4 or not 0 <= max_bytes < align:
+                        raise AsmError(
+                            f"{where}: .align max must be 0 or a multiple of 4 below {align}"
+                        )
+                    off = len(sections[at()])
+                    sections[at()].extend(NOP.to_bytes(4, "little") * ((align - 4) // 4))
+                    aligns.append((at(), off, align, max_bytes))
+                else:
+                    pad = (-len(sections[at()])) & (align - 1)
+                    sections[at()].extend(b"\x00" * pad)
             elif d in (".word", ".quad", ".byte"):
                 define()
                 n = {".word": 4, ".quad": 8, ".byte": 1}[d]
@@ -401,6 +416,13 @@ def assemble(src: str, name: str = "a.obj") -> str:
             + (f"{off}" if off < DECIMAL_REL_OFFSET else f"{off:#x}")
             + f" {kind}"
             + (f" {sym}" if sym is not None else "")
+        )
+    for s, off, align, max_bytes in aligns:
+        out.append(
+            f"ALIGN {s} "
+            + (f"{off}" if off < DECIMAL_REL_OFFSET else f"{off:#x}")
+            + f" {align:#x}"
+            + (f" {max_bytes:#x}" if max_bytes else "")
         )
     return "\n".join(out) + "\n"
 

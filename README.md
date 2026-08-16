@@ -17,8 +17,8 @@ assembly text ──► larch_asm ──► object ──► linker_loongarch �
 
 | module | role |
 |---|---|
-| `larch_asm.py` | two-pass assembler: labels, `%pcala_hi20/lo12` and `%got_pc_hi20/lo12` relocation suffixes, `R_LARCH_RELAX` markers on every relaxable pair |
-| `linker_loongarch.py` | static linker: strong/weak/common resolution, section merging, synthesized `.plt`/`.got`/`.common`, the six relocations the toolchain emits (R_LARCH_64, PCALA_HI20/LO12, GOT_PC_HI20/LO12, B26, PCREL20_S2), `verify()` re-derives every patch, and **R_LARCH_RELAX relaxation** folds `pcalau12i`+`addi/ld` pairs to `pcaddi` at a fixpoint |
+| `larch_asm.py` | two-pass assembler: labels, `%pcala_hi20/lo12` and `%got_pc_hi20/lo12` relocation suffixes, `R_LARCH_RELAX` markers on every relaxable pair, `.align` in `.text` emits max NOPs + `R_LARCH_ALIGN` |
+| `linker_loongarch.py` | static linker: strong/weak/common resolution, section merging, synthesized `.plt`/`.got`/`.common`, the six relocations the toolchain emits (R_LARCH_64, PCALA_HI20/LO12, GOT_PC_HI20/LO12, B26, PCREL20_S2), `verify()` re-derives every patch, **R_LARCH_RELAX** folds `pcalau12i`+`addi/ld` pairs to `pcaddi` at a fixpoint, and **R_LARCH_ALIGN** deletes unneeded NOPs inside every layout pass |
 | `larch_emu.py` | 26-instruction LA64 interpreter (encodings cross-checked against QEMU's `insns.decode`), with a per-instruction tracer |
 | `larch_dis.py` | linear-sweep disassembler on the interpreter's decoder; branch targets and relaxed `pcaddi` forms resolve to symbols |
 | `elf_loongarch.py` | real ELF64-loongarch ET_REL writer + reader (recognized by `file`/`readelf`), including R_LARCH_RELAX (100) and R_LARCH_PCREL20_S2 (103) |
@@ -66,6 +66,7 @@ SYM _start G .text 0
 REL .text 0 PCALA_HI20 magic
 REL .text 4 PCALA_LO12 magic
 REL .text 4 RELAX
+ALIGN .text 8 16 8
 ```
 
 `elf_loongarch.py` converts these to and from real ELF64-loongarch
@@ -75,11 +76,11 @@ relocatable files.
 
 - Instruction subset: the base integer + LA64 subset the assembler emits
   (no SIMD, no privileged instructions, no floats).
-- `.align` inside code is fixed at assembly time; real toolchains use
-  `R_LARCH_ALIGN` for alignment during relaxation.
+- `elf_loongarch.py` does not yet round-trip `R_LARCH_ALIGN`; the text
+  object path carries the align requests.
 - The linker reads the toy text format (or the bundled ELF reader), not
   arbitrary toolchain output; relaxation covers the canonical
-  `pcalau12i`+`addi/ld` pairs lld relaxes.
+  `pcalau12i`+`addi/ld` pairs and alignment NOP deletion.
 
 ## License & acknowledgments
 

@@ -33,6 +33,9 @@ Grounding (spec, all formulas verbatim from the sources):
                                  aligned"
       R_LARCH_RELAX       = 100  "Instruction can be relaxed, paired with a
                                  normal relocation at the same address"
+      R_LARCH_ALIGN       = 102  "Alignment directive; delete NOPs emitted
+                                 for .align" (toy addend form: alignment bytes,
+                                 optional max NOP bytes)
       R_LARCH_PCREL20_S2  = 103  "22-bit PC-relative offset, %pcrel_20(symbol):
                                  (*(uint32_t *) PC) [24 ... 5] = (S+A-PC) [21 ... 2]"
                                  (the relocation a folded pair leaves behind)
@@ -164,16 +167,48 @@ Reloc = tuple[str, int, str, str | None]  # (section, offset, kind, symbol|None)
 
 
 @dataclass
+class Align:
+    """One R_LARCH_ALIGN request.
+
+    `offset` points at the first byte of the max-NOP run the assembler
+    emitted (`align - 4` bytes). `max_bytes` is the maximum number of NOPs
+    the sequence is willing to keep; 0 means "always align" (binutils'
+    symbol-index-0 form)."""
+
+    section: str
+    offset: int
+    align: int  # byte alignment, a power of two >= 4
+    max_bytes: int  # max NOPs to keep; 0 = unlimited
+
+
+@dataclass
+class AlignStep:
+    """One R_LARCH_ALIGN decision made during a layout pass."""
+
+    pass_no: int
+    obj: str
+    section: str
+    offset: int
+    align: int
+    max_bytes: int
+    site: int  # address of the first NOP in this layout
+    needed: int  # NOP bytes needed to reach the boundary from `site`
+    removed: int  # NOP bytes deleted in this layout
+    abandoned: bool  # max_bytes was exceeded: all NOPs removed
+
+
+@dataclass
 class Object:
     name: str
     sections: dict[str, bytearray]  # section name -> bytes
     symbols: dict[str, Symbol]  # kind 'G'|'L'|'W'|'C'
     relocs: list[Reloc]
+    aligns: list[Align]  # R_LARCH_ALIGN requests, sorted by offset
 
 
 def parse_object(text: str, name: str) -> Object:
     """Parse the text object format above into an Object."""
-    obj = Object(name, {}, {}, [])
+    obj = Object(name, {}, {}, [], [])
     cur = None
     for ln, raw in enumerate(text.splitlines(), 1):
         tok = raw.strip().split()
@@ -191,6 +226,18 @@ def parse_object(text: str, name: str) -> Object:
         elif tok[0] == "REL":
             # 5 tokens: REL sec off KIND sym ; 4 tokens (RELAX marker): no sym
             obj.relocs.append((tok[1], int(tok[2], 0), tok[3], tok[4] if len(tok) > 4 else None))
+        elif tok[0] == "ALIGN":
+            # ALIGN sec off alignment [max_bytes]
+            sec, off = tok[1], int(tok[2], 0)
+            align, max_bytes = int(tok[3], 0), int(tok[4], 0) if len(tok) > 4 else 0
+            if align < 4 or align & (align - 1):
+                raise LinkError(f"{name}:{ln}: alignment must be a power of two >= 4")
+            if off % 4 or max_bytes % 4 or not 0 <= max_bytes < align:
+                raise LinkError(
+                    f"{name}:{ln}: bad R_LARCH_ALIGN off/max "
+                    f"({off:#x}, {max_bytes:#x}) for alignment {align:#x}"
+                )
+            obj.aligns.append(Align(sec, off, align, max_bytes))
         elif cur is not None:
             obj.sections[cur].extend(int(b, 16) for b in tok)
         else:
@@ -258,6 +305,9 @@ class Layout:
     got_addr: int
     common_addr: int
     common_size: int
+    # (obj, section) -> [(align offset, bytes removed)] in offset order.
+    # Used to shift later reloc/symbol offsets in the output image.
+    align_delta: dict[tuple[str, str], list[tuple[int, int]]]
 
 
 def pcrel_page_field(target: int, pc: int) -> int:
@@ -271,6 +321,71 @@ def pcrel_page_field(target: int, pc: int) -> int:
     if lo > 0x7FF:
         hi += 0x1000
     return hi >> 12  # exact: hi is a multiple of 0x1000
+
+
+def align_shift(plan, offset):
+    """Bytes deleted before `offset` by one section's ALIGN plan."""
+    return sum(removed for off, removed in plan if off < offset)
+
+
+def _make_align_plan(o, sec, start, *, pass_no=0, align_log=None):
+    """Compute R_LARCH_ALIGN deletions for one contribution at `start`.
+
+    The input section holds the assembler's maximum NOP run at each ALIGN
+    record (`align - 4` bytes). For each request, in offset order, compute
+    how many NOPs the current address actually needs and delete the rest;
+    later requests see the already-shrunk section. `max_bytes` abandons the
+    alignment (delete all NOPs) when the needed run would exceed it, per
+    binutils `loongarch_relax_align` / lld's R_LARCH_ALIGN handling.
+    """
+    plan = []
+    removed_before = 0
+    for al in sorted((a for a in o.aligns if a.section == sec), key=lambda a: a.offset):
+        site = start + al.offset - removed_before
+        off = site & (al.align - 1)
+        needed = 0 if off == 0 else al.align - off
+        all_bytes = al.align - 4
+        if al.max_bytes and needed > al.max_bytes:
+            removed, keep, abandoned = all_bytes, 0, True
+        else:
+            removed, keep, abandoned = all_bytes - needed, needed, False
+        if removed < 0:
+            raise LinkError(
+                f"{o.name}: R_LARCH_ALIGN at {sec}+{al.offset:#x} has "
+                f"{all_bytes} NOP bytes but needs {needed} at {site:#x}"
+            )
+        if align_log is not None:
+            align_log.append(
+                AlignStep(
+                    pass_no,
+                    o.name,
+                    sec,
+                    al.offset,
+                    al.align,
+                    al.max_bytes,
+                    site,
+                    needed,
+                    removed,
+                    abandoned,
+                )
+            )
+        # Keep the first `keep` NOPs; the deletion starts after them.
+        plan.append((al.offset + keep, removed))
+        removed_before += removed
+    return plan
+
+
+def _shrink_section(data, plan):
+    """Copy `data` minus the byte ranges recorded in `plan`."""
+    out = bytearray()
+    prev = 0
+    for off, removed in plan:
+        if off < prev or off + removed > len(data):
+            raise LinkError(f"ALIGN deletion {off:#x}+{removed:#x} outside section")
+        out += data[prev:off]
+        prev = off + removed
+    out += data[prev:]
+    return out
 
 
 @dataclass
@@ -355,7 +470,11 @@ def try_relax_one(objects, layout, symaddr, *, pass_no=0, log=None):
                     f"{o.name}: RELAX at {sec}+{roff:#x} without "
                     f"a paired HI20 at {sec}+{roff - 4:#x}"
                 )
-            pc = layout.offs[(o.name, sec)] + roff
+            pc = (
+                layout.offs[(o.name, sec)]
+                + roff
+                - align_shift(layout.align_delta[(o.name, sec)], roff)
+            )
             if kind == "GOT_PC_LO12":
                 if sym not in defined:
                     note("skip", None, None, "GOT target is not link-time defined")
@@ -415,20 +534,38 @@ def _apply_relax(o, sec, roff):
         n: (k2, s2, v - 4 if s2 == sec and v >= roff else v, z)
         for n, (k2, s2, v, z) in o.symbols.items()
     }
+    o.aligns = [
+        Align(
+            a.section,
+            a.offset - 4 if a.section == sec and a.offset >= roff else a.offset,
+            a.align,
+            a.max_bytes,
+        )
+        for a in o.aligns
+    ]
 
 
-def link(objects, base=BASE, *, relax=True, relax_log=None):
+def link(objects, base=BASE, *, relax=True, relax_log=None, align_log=None):
     """Link objects into one image. Returns (image, symaddr, layout).
 
     With relax=True (the default, like real ld) the layout/apply/relax
     cycle repeats to a fixpoint: each fold of a relaxable pair shrinks a
     section, addresses shift, and further folds may become possible.
 
+    R_LARCH_ALIGN is handled inside every `link_once` layout: the full NOP
+    run stays in the input object, and the layout computes how much of it
+    survives at the current addresses. Pair folds and alignment deletion
+    therefore feed each other through the same re-layout loop.
+
     If `relax_log` is a list, the relaxation loop appends a RelaxStep for
     every candidate considered (folds and skips, with the skip reason).
+    If `align_log` is a list, every layout pass appends an AlignStep per
+    R_LARCH_ALIGN request.
     """
     defs, commons, locs = resolve(objects)
-    image, symaddr, layout = link_once(objects, base, defs, commons, locs)
+    image, symaddr, layout = link_once(
+        objects, base, defs, commons, locs, align_pass=0, align_log=align_log
+    )
     if not relax:
         return image, symaddr, layout
     pass_no = 0
@@ -436,18 +573,29 @@ def link(objects, base=BASE, *, relax=True, relax_log=None):
         pass_no += 1
         if not try_relax_one(objects, layout, symaddr, pass_no=pass_no, log=relax_log):
             break
-        image, symaddr, layout = link_once(objects, base, defs, commons, locs)
+        defs, commons, locs = resolve(objects)  # symbol offsets shifted by the fold
+        image, symaddr, layout = link_once(
+            objects, base, defs, commons, locs, align_pass=pass_no, align_log=align_log
+        )
     return image, symaddr, layout
 
 
-def link_once(objects, base, defs, commons, locs):
-    """One layout + apply round (used by the relaxation fixpoint)."""
+def link_once(objects, base, defs, commons, locs, *, align_pass=0, align_log=None):
+    """One layout + apply round (used by the relaxation fixpoint).
+
+    R_LARCH_ALIGN is evaluated here from the current contribution
+    addresses: the object still contains the full max-NOP run, and the
+    layout decides how much survives. This keeps alignment decisions
+    recomputable after every pair fold instead of committing a deletion
+    that a later fold could invalidate.
+    """
     # --- 3. layout --------------------------------------------------------
     # Merge same-named input sections in link order (Taylor part 2), then
     # synthesize .plt (one 12-byte stub per GOT_PC-referenced symbol),
     # .got (one 8-byte slot per GOT_PC-referenced symbol; the PLT stubs
     # share the slots), and .common (zero-filled, per merged common).
     merged = {}  # section name -> [(obj, bytes)]
+    by_name = {o.name: o for o in objects}
     for o in objects:
         for sec, data in o.sections.items():
             merged.setdefault(sec, []).append((o.name, data))
@@ -459,13 +607,20 @@ def link_once(objects, base, defs, commons, locs):
                 got_ord.append(sym)
     addr = base
     sec_addr, offs = {}, {}  # output section addr; contribution addr
+    align_delta = {}  # (obj, section) -> ALIGN deletion plan
+    shrunk_size = {}  # (obj, section) -> contribution length after ALIGN
     for sec, parts in merged.items():
         addr = (addr + ALIGN - 1) & ~(ALIGN - 1)
         sec_addr[sec] = addr
         for oname, data in parts:
             addr = (addr + ALIGN - 1) & ~(ALIGN - 1)  # align each contribution
             offs[(oname, sec)] = addr
-            addr += len(data)
+            o = by_name[oname]
+            plan = _make_align_plan(o, sec, addr, pass_no=align_pass, align_log=align_log)
+            align_delta[(oname, sec)] = plan
+            total_removed = sum(removed for _, removed in plan)
+            shrunk_size[(oname, sec)] = len(data) - total_removed
+            addr += shrunk_size[(oname, sec)]
     addr = (addr + ALIGN - 1) & ~(ALIGN - 1)
     plt_addr = addr
     plt = {s: addr + 12 * i for i, s in enumerate(got_ord)}  # 3 insns x 4 B
@@ -486,10 +641,14 @@ def link_once(objects, base, defs, commons, locs):
     for sec, parts in merged.items():
         for oname, data in parts:
             at = offs[(oname, sec)] - base
-            image[at : at + len(data)] = data
+            out = _shrink_section(data, align_delta[(oname, sec)])
+            image[at : at + len(out)] = out
     # symbol addresses come from the *resolved* table (strong-over-weak,
-    # first-weak, common slots); undefined weaks get 0.
-    symaddr = {n: offs[(o, sec)] + val for n, (_, o, sec, val) in defs.items()}
+    # first-weak, common slots), with ALIGN deletions before the symbol
+    # offset applied; undefined weaks get 0.
+    symaddr = {}
+    for n, (_, o, sec, val) in defs.items():
+        symaddr[n] = offs[(o, sec)] + val - align_shift(align_delta[(o, sec)], val)
     symaddr.update(common)
     for o in objects:
         for n, (kind, sec, _, _) in o.symbols.items():
@@ -500,11 +659,13 @@ def link_once(objects, base, defs, commons, locs):
     for o in objects:
         olocs = locs.get(o.name, {})
         for sec, roff, kind, sym in o.relocs:
-            site = offs[(o.name, sec)] + roff  # r_offset: instruction/word addr
+            shift = align_shift(align_delta[(o.name, sec)], roff)
+            site = offs[(o.name, sec)] + roff - shift  # r_offset after ALIGN
             if kind in ("GOT_PC_HI20", "GOT_PC_LO12"):
                 target = got.get(sym)  # GP+G: the slot's address
             elif sym in olocs:
-                target = offs[(o.name, olocs[sym][0])] + olocs[sym][1]
+                ls, lv = olocs[sym]
+                target = offs[(o.name, ls)] + lv - align_shift(align_delta[(o.name, ls)], lv)
             else:
                 target = symaddr.get(sym)
             if kind == "RELAX":
@@ -518,7 +679,6 @@ def link_once(objects, base, defs, commons, locs):
                 "R_LARCH_64",
                 "PCREL20_S2",
             ):
-                raise LinkError(f"{o.name}: unknown relocation kind {kind}")
                 raise LinkError(f"{o.name}: unknown relocation kind {kind}")
             if target is None:
                 raise LinkError(f"{o.name}: {kind} for undefined symbol '{sym}'")
@@ -589,7 +749,9 @@ def link_once(objects, base, defs, commons, locs):
         loc = next(((o, ls[sym]) for o, ls in locs.items() if sym in ls), None)
         if loc is not None:  # GOT slot for an object-local
             o, s = loc
-            value = (offs[(o, s[0])] + s[1] - base) & MASK
+            value = (
+                offs[(o, s[0])] + s[1] - align_shift(align_delta[(o, s[0])], s[1]) - base
+            ) & MASK
         else:
             value = (symaddr.get(sym, 0) - base) & MASK
         p = at - base
@@ -611,6 +773,7 @@ def link_once(objects, base, defs, commons, locs):
             got_addr,
             common_addr,
             common_size,
+            align_delta,
         ),
     )
 
@@ -629,7 +792,11 @@ def verify(image, base, objects, layout, symaddr):
 
     for o in objects:
         for sec, roff, kind, sym in o.relocs:
-            site = layout.offs[(o.name, sec)] + roff
+            site = (
+                layout.offs[(o.name, sec)]
+                + roff
+                - align_shift(layout.align_delta[(o.name, sec)], roff)
+            )
             if kind in ("PCALA_HI20", "GOT_PC_HI20"):
                 target = symaddr[sym] if kind == "PCALA_HI20" else layout.got[sym]
                 assert field_at(site, 5, 24) == pcrel_page_field(target, site) & 0xFFFFF, (
@@ -726,6 +893,21 @@ SYM magic_ptr G .data 8
 REL .data 8 R_LARCH_64 magic
 """
 
+ALIGN_TRACE_OBJ = """\
+# align-demo.obj: one relaxable pair followed by .align 16, max 8 NOPs.
+# Before the pair folds the ALIGN site is +8 (8 NOPs needed, within max);
+# after the fold it is +4, alignment would need 12 > max, so the whole
+# max-NOP run is deleted and the alignment is abandoned.
+SEC .text
+04 00 00 1a 84 00 c0 02
+00 00 40 03 00 00 40 03 00 00 40 03
+SYM x G .text 8
+REL .text 0 PCALA_HI20 x
+REL .text 4 PCALA_LO12 x
+REL .text 4 RELAX
+ALIGN .text 8 0x10 8
+"""
+
 
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
@@ -784,7 +966,8 @@ def main(argv=None):
 
     print("\n== 2. layout (3 objects, sections merged by name) ==")
     relax_log = [] if trace else None
-    image, symaddr, layout = link([a, b, c], relax_log=relax_log)
+    align_log = [] if trace else None
+    image, symaddr, layout = link([a, b, c], relax_log=relax_log, align_log=align_log)
     for o in (a, b, c):
         for sec, data in o.sections.items():
             print(f"  {layout.offs[(o.name, sec)]:#08x}  {sec:<6} {len(data):>3} B  {o.name}")
@@ -869,6 +1052,36 @@ def main(argv=None):
                     f"  pass {s.pass_no}: SKIP {s.obj} {s.section}+{s.offset:#x} "
                     f"{s.kind} {s.sym}: {s.reason}"
                 )
+
+    if trace and align_log is not None:
+        print("\n== 6. R_LARCH_ALIGN trace ==")
+        if not align_log:
+            print("  no R_LARCH_ALIGN request was considered")
+        for a in align_log:
+            how = "abandoned" if a.abandoned else "aligned"
+            print(
+                f"  pass {a.pass_no}: {how:9} {a.obj} {a.section}+{a.offset:#x} "
+                f"align {a.align:#x} site {a.site:#x} -> keep {a.needed:#x} "
+                f"NOP bytes, delete {a.removed:#x}"
+            )
+
+    if trace:
+        print("\n== 7. ALIGN x pair-fold interaction ==")
+        demo = parse_object(ALIGN_TRACE_OBJ, "align-demo.obj")
+        demo_relax, demo_align = [], []
+        demo_image, demo_sym, _ = link([demo], BASE, relax_log=demo_relax, align_log=demo_align)
+        for s in demo_relax:
+            print(
+                f"  pass {s.pass_no}: FOLD {s.kind} {s.sym} (ALIGN site moves {s.offset:#x} -> 4)"
+            )
+        for a in demo_align:
+            how = "abandoned" if a.abandoned else "aligned"
+            print(
+                f"  pass {a.pass_no}: {how:9} site {a.site:#x} "
+                f"needs {a.needed:#x} NOPs, max {a.max_bytes:#x}, "
+                f"delete {a.removed:#x}"
+            )
+        print(f"  final image {len(demo_image):#x} bytes; x -> {demo_sym['x']:#x} (section end)")
 
 
 if __name__ == "__main__":

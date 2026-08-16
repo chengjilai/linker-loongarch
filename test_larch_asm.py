@@ -165,12 +165,14 @@ class TestRelocs(unittest.TestCase):
             ".text\nnop1:\nandi r0, r0, 0\n.align 4\n.data\n.word 7\n",
             "t.obj",
         )
-        # .align 4 in .text pads with NOPs to 16 bytes
+        # .align 4 in .text emits the full max run (12 NOP bytes) and an
+        # R_LARCH_ALIGN request for the linker.
         self.assertIn("SEC .text", obj)
         text = obj.split("SEC .text")[1].split("SEC .data")[0]
         toks = text.split()
         self.assertEqual(len(toks), 16)  # 4-byte instr + 12 NOP bytes
         self.assertEqual(toks[4:], ["00", "00", "40", "03"] * 3)  # NOP, LE bytes
+        self.assertIn("ALIGN .text 4 0x10", obj)
 
 
 class TestErrors(unittest.TestCase):
