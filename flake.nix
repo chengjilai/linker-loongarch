@@ -16,7 +16,10 @@
 #
 # Run:
 #   nix run                 # link the 3 demo objects, verify, emulate -> a0 = 6
-#   nix run .#asm           # the toolchain: assemble -> link -> emulate
+#   nix run .#asm           # the toolchain demo: assemble -> link -> emulate
+#   nix run .#larch-as      # assemble one .s file to .obj or .o
+#   nix run .#larch-ld      # link .s/.obj/.o inputs into a raw image
+#   nix run .#larch-run     # emulate an image and print a0
 #   nix run .#dis           # disassemble the linked image (symbols + relocs)
 #   nix run .#elf           # write real ELF64-loongarch .o files, read back
 #   nix run .#test          # unittest suites (5 modules)
@@ -52,6 +55,30 @@
             cd ${src}
             exec ${pkgs.python3}/bin/python3 -B larch_asm.py "$@"
           ''}/bin/larch-asm";
+        };
+        larch-as = {
+          type = "app";
+          program = "${pkgs.writeShellScriptBin "larch-as" ''
+            set -euo pipefail
+            cd ${src}
+            exec ${pkgs.python3}/bin/python3 -B larch_cli.py as "$@"
+          ''}/bin/larch-as";
+        };
+        larch-ld = {
+          type = "app";
+          program = "${pkgs.writeShellScriptBin "larch-ld" ''
+            set -euo pipefail
+            cd ${src}
+            exec ${pkgs.python3}/bin/python3 -B larch_cli.py ld "$@"
+          ''}/bin/larch-ld";
+        };
+        larch-run = {
+          type = "app";
+          program = "${pkgs.writeShellScriptBin "larch-run" ''
+            set -euo pipefail
+            cd ${src}
+            exec ${pkgs.python3}/bin/python3 -B larch_cli.py run "$@"
+          ''}/bin/larch-run";
         };
         dis = {
           type = "app";
@@ -93,7 +120,7 @@
             cd ${src}
             ${pkgs.python3}/bin/python3 -B -m unittest -v \
               test_linker_loongarch test_larch_emu test_larch_asm \
-              test_larch_dis test_elf_loongarch
+              test_larch_dis test_elf_loongarch test_larch_cli
           ''}/bin/test";
         };
       };

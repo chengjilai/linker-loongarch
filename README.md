@@ -52,7 +52,17 @@ nix develop        # python3, ruff, ty
 No nix? `python3 -B larch_asm.py`, `python3 -B linker_loongarch.py`,
 `python3 -B linker_loongarch.py --trace` for the relaxation trace, or the
 test suites via `python3 -B -m unittest -v test_linker_loongarch test_larch_emu
-test_larch_asm test_larch_dis test_elf_loongarch`.
+test_larch_asm test_larch_dis test_elf_loongarch test_larch_cli`.
+
+Command-line driver:
+
+```
+nix run .#larch-as -- prog.s -o prog.obj     # text object (or prog.o for ELF)
+nix run .#larch-ld -- prog.obj -o prog.bin -e _start --run
+nix run .#larch-run -- prog.bin -e 0
+```
+
+`larch-ld` accepts `.s`, toy `.obj`, and GNU as `.o` inputs directly.
 
 ## The object format
 
