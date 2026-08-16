@@ -259,6 +259,18 @@ def encode_instruction(
     raise AsmError(f"{where}: {mnem} not implemented")
 
 
+def _abs_expr(tok: str, where: str) -> tuple[str, int] | tuple[None, int]:
+    """Parse `number`, `sym`, or `sym+/-number` for .word/.quad."""
+    try:
+        return None, int(tok, 0)
+    except ValueError:
+        pass
+    m = re.match(r"^([A-Za-z_.$][\w.$]*)([+-](?:0[xX][0-9A-Fa-f]+|\d+))?$", tok)
+    if m is None:
+        raise AsmError(f"{where}: bad absolute expression {tok!r}")
+    return m.group(1), int(m.group(2) or "0", 0)
+
+
 def _parse_string(tok: str, where: str) -> bytes:
     """Parse a quoted string token with \\n \\t \\" \\\\ escapes."""
     if not (tok.startswith('"') and tok.endswith('"') and len(tok) >= 2):
@@ -293,7 +305,7 @@ def assemble(src: str, name: str = "a.obj") -> str:
     labels = []  # (name, section, offset) in definition order
     globals_ = set()
     commons = []  # (name, size, align) in declaration order
-    relocs = []  # (section, offset, kind, symbol)
+    relocs = []  # (section, offset, kind, symbol, addend)
     aligns = []  # (section, offset, alignment bytes, max NOP bytes to keep)
     pending = None  # label awaiting a body
 
@@ -363,11 +375,15 @@ def assemble(src: str, name: str = "a.obj") -> str:
                 define()
                 n = {".word": 4, ".quad": 8, ".byte": 1}[d]
                 for v in tok[1:]:
-                    if d == ".quad" and v.isidentifier():
-                        relocs.append((at(), len(sections[at()]), "R_LARCH_64", v))
-                        sections[at()].extend(b"\x00" * 8)
+                    sym, addend = _abs_expr(v, where)
+                    if sym is None:
+                        sections[at()].extend(addend.to_bytes(n, "little"))
+                    elif d in (".word", ".quad"):
+                        kind = "R_LARCH_32" if d == ".word" else "R_LARCH_64"
+                        relocs.append((at(), len(sections[at()]), kind, sym, addend))
+                        sections[at()].extend(b"\x00" * n)
                     else:
-                        sections[at()].extend(int(v, 0).to_bytes(n, "little"))
+                        raise AsmError(f"{where}: .byte needs a number, not {v!r}")
             elif d in (".ascii", ".asciz"):
                 define()
                 b = _parse_string(raw[raw.index(d) + len(d) :].strip(), where)
@@ -404,7 +420,7 @@ def assemble(src: str, name: str = "a.obj") -> str:
                 iword, irels = encode_instruction(imnem, iops, where)
                 sections[at()].extend(iword)
                 for _, kind, isym in irels:
-                    relocs.append((at(), off + 4 * step, kind, isym))
+                    relocs.append((at(), off + 4 * step, kind, isym, 0))
             continue
         if mnem not in ENC:
             raise AsmError(f"{where}: unknown instruction {mnem!r}")
@@ -412,7 +428,7 @@ def assemble(src: str, name: str = "a.obj") -> str:
         word, rels = encode_instruction(mnem, ops, where)
         sections[at()].extend(word)
         for _, kind, sym in rels:
-            relocs.append((at(), off, kind, sym))
+            relocs.append((at(), off, kind, sym, 0))
 
     if pending is not None:
         raise AsmError(f"{name}: label {pending!r} has no body")
@@ -431,7 +447,7 @@ def assemble(src: str, name: str = "a.obj") -> str:
         out.append(f"SYM {n} {'G' if n in globals_ else 'L'} {s} {off}")
     for n, size, align in commons:  # .common declaration order
         out.append(f"SYM {n} C - {align} {size}")
-    for s, off, kind, sym in relocs:
+    for s, off, kind, sym, addend in relocs:
         # offsets < 0xa decimal, else hex — matches the hand-encoded
         # originals byte-for-byte; RELAX markers carry no symbol
         out.append(
@@ -439,6 +455,7 @@ def assemble(src: str, name: str = "a.obj") -> str:
             + (f"{off}" if off < DECIMAL_REL_OFFSET else f"{off:#x}")
             + f" {kind}"
             + (f" {sym}" if sym is not None else "")
+            + (f" {addend}" if addend else "")
         )
     for s, off, align, max_bytes in aligns:
         out.append(

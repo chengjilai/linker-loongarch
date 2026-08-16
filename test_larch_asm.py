@@ -172,6 +172,16 @@ class TestRelocs(unittest.TestCase):
             ],
         )
 
+    def test_word_quad_addend_expressions(self):
+        obj = asm.assemble(
+            ".data\n.global magic\nmagic:\n.quad 7\n.quad magic+8\n.word magic\n.word magic-4\n",
+            "t.obj",
+        )
+        self.assertIn("SYM magic G .data 0", obj)
+        self.assertIn("REL .data 8 R_LARCH_64 magic 8", obj)
+        self.assertIn("REL .data 0x10 R_LARCH_32 magic", obj)
+        self.assertIn("REL .data 0x14 R_LARCH_32 magic -4", obj)
+
     def test_quad_label(self):
         obj = asm.assemble(".data\n.quad magic\n", "t.obj")
         self.assertIn("REL .data 0 R_LARCH_64 magic", obj)
