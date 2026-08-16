@@ -184,9 +184,13 @@ class TestErrors(unittest.TestCase):
         with self.assertRaises(asm.AsmError):
             asm.assemble(".text\naddi.d r99, r4, 0\n", "t.obj")
 
-    def test_branch_cond_label_rejected(self):
+    def test_branch_cond_label_emits_b16(self):
+        obj = asm.assemble(".text\nbeq r4, r5, somewhere\n", "t.obj")
+        self.assertIn("REL .text 0 B16 somewhere", obj)
+
+    def test_jirl_label_rejected(self):
         with self.assertRaises(asm.AsmError):
-            asm.assemble(".text\nbeq r4, r5, somewhere\n", "t.obj")
+            asm.assemble(".text\njirl r1, r4, somewhere\n", "t.obj")
 
     def test_label_without_body(self):
         with self.assertRaises(asm.AsmError):

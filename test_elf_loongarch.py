@@ -181,6 +181,9 @@ class TestGnuAsObject(unittest.TestCase):
         self.assertIn((".data", 8, "R_LARCH_64", "magic", 8), obj.relocs)
         self.assertIn((".data", 16, "R_LARCH_32", "magic", 0), obj.relocs)
         self.assertIn((".text", 0, "RELAX", None, 0), obj.relocs)
+        self.assertIn((".text", 12, "B16", "done", 0), obj.relocs)
+        self.assertIn("done", obj.symbols)
+        self.assertEqual(obj.symbols["done"][0], "L")
 
     def test_fixture_links_and_emulates(self):
         import larch_emu

@@ -234,11 +234,11 @@ def encode_instruction(
     if kind == "rjrd_offs16":  # jirl/beq/bne/blt
         a, b, offs = ops
         ra, rb = _reg(a, where), _reg(b, where)
-        if ops[2].isidentifier():  # label: no reloc kind in the toy
-            raise AsmError(
-                f"{where}: {mnem} with a label needs a numeric offset "
-                f"(no branch-cond reloc in the toy linker)"
-            )
+        if ops[2].isidentifier():  # label
+            if mnem not in ("beq", "bne", "blt"):
+                raise AsmError(f"{where}: {mnem} with a label is not supported")
+            relocs.append((None, "B16", ops[2]))
+            return emit_word(op << 26 | ra << 5 | rb), relocs
         v = _sext(_imm(offs, where, 16), 16)
         if v % 4:
             raise AsmError(f"{where}: offset must be 4-aligned")

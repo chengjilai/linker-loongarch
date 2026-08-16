@@ -3,6 +3,9 @@
 _start:
   la.local $r4, magic
   ld.d $r4, $r4, 0
+  beq $r4, $r4, done
+  addi.d $r4, $r0, 99
+done:
   addi.d $r4, $r4, 0
   b image_end
 

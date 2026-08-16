@@ -686,6 +686,7 @@ def link_once(objects, base, defs, commons, locs, *, align_pass=0, align_log=Non
                 "GOT_PC_LO12",
                 "PCALA_HI20",
                 "PCALA_LO12",
+                "B16",
                 "B26",
                 "R_LARCH_64",
                 "R_LARCH_32",
@@ -715,6 +716,16 @@ def link_once(objects, base, defs, commons, locs, *, align_pass=0, align_log=Non
                 image[img_off : img_off + 4] = insn.to_bytes(4, "little")
             elif kind in ("PCALA_LO12", "GOT_PC_LO12"):
                 field = target & 0xFFF  # si12 -> bits [21:10]
+                insn = int.from_bytes(image[img_off : img_off + 4], "little")
+                insn |= field << 10
+                image[img_off : img_off + 4] = insn.to_bytes(4, "little")
+            elif kind == "B16":
+                disp = target - site  # S + A - PC
+                if disp % 4:
+                    raise LinkError(f"B16 misaligned for '{sym}' at {site:#x}")
+                if not -(1 << 17) <= disp < (1 << 17):
+                    raise LinkError(f"B16 overflow for '{sym}' at {site:#x}")
+                field = (disp >> 2) & 0xFFFF
                 insn = int.from_bytes(image[img_off : img_off + 4], "little")
                 insn |= field << 10
                 image[img_off : img_off + 4] = insn.to_bytes(4, "little")
@@ -833,6 +844,19 @@ def verify(image, base, objects, layout, symaddr):
                 assert field_at(site, 10, 21) == target & 0xFFF, (
                     f"patch for '{sym}' ({kind}) at {site:#x}"
                 )
+            elif kind == "B16":
+                target = symaddr.get(sym)
+                if target is None:
+                    ls, lv = locs[o.name][sym]
+                    target = (
+                        layout.offs[(o.name, ls)]
+                        + lv
+                        - align_shift(layout.align_delta[(o.name, ls)], lv)
+                    )
+                target += addend
+                disp = target - site
+                field = (disp >> 2) & 0xFFFF
+                assert field_at(site, 10, 25) == field, f"patch for '{sym}' (B16) at {site:#x}"
             elif kind == "B26":
                 target = symaddr.get(sym)
                 if target is None:
@@ -1065,6 +1089,11 @@ def main(argv=None):
             print(
                 f"  {objn} {sec}+{roff:#04x} {kind:<12} {sym:<8} "
                 f"lo={field:#03x} (target {target:#x})  ok"
+            )
+        elif kind == "B16":
+            print(
+                f"  {objn} {sec}+{roff:#04x} {kind:<12} {sym:<8} "
+                f"offs16={field:#x} ({target:#x} - {site:#x})  ok"
             )
         elif kind == "B26":
             print(

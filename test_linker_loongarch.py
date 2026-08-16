@@ -75,6 +75,27 @@ class TestRelocations(unittest.TestCase):
         # low 16 bits of the field sit at bits 10..25
         self.assertEqual((word >> 10) & 0xFFFF, 2)
 
+    def test_b16_branch(self):
+        # beq at BASE to BASE+8: offs16 field = 8 >> 2 = 2, bits [25:10]
+        image, symaddr, _ = link_texts(
+            "SEC .text\n00 00 00 00\n00 00 00 00\n"
+            "SYM here G .text 0\nSYM there G .text 4\n"
+            "REL .text 0 B16 there\n"
+        )
+        word = int.from_bytes(image[0:4], "little")
+        disp = symaddr["there"] - ll.BASE
+        self.assertEqual((word >> 10) & 0xFFFF, disp >> 2)
+
+    def test_b16_local_target(self):
+        image, _, layout = link_texts(
+            "SEC .text\n00 00 00 00\n00 00 00 00\n"
+            "SYM here L .text 0\nSYM there L .text 4\n"
+            "REL .text 0 B16 there\n"
+        )
+        word = int.from_bytes(image[0:4], "little")
+        self.assertEqual((word >> 10) & 0xFFFF, 1)
+        self.assertTrue(any(k == "B16" for _, _, _, k, _, _, _, _ in layout.applied))
+
     def test_got_pair(self):
         # an undefined 'f' forces a GOT slot; the pair must agree on it
         image, _, layout = link_texts(
