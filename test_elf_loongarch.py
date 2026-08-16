@@ -10,6 +10,7 @@ import contextlib
 import importlib.util
 import io
 import os
+import pathlib
 import struct
 import subprocess
 import tempfile
@@ -83,7 +84,7 @@ class TestHeader(unittest.TestCase):
                 E.write_object(obj, p)
                 rb = E.read_object(p)
                 expected = dict(obj.symbols)
-                for _, _, _, sym in obj.relocs:
+                for _, _, _, sym, _ in obj.relocs:
                     if sym is not None:  # RELAX markers carry no symbol
                         expected.setdefault(sym, ("G", None, 0, 0))
                 self.assertEqual(rb.sections, obj.sections)
@@ -166,6 +167,45 @@ class TestErrors(unittest.TestCase):
             open(p, "wb").write(data)
             with self.assertRaises(E.ElfError):
                 E.read_object(p)
+
+
+class TestGnuAsObject(unittest.TestCase):
+    """Read a real GNU as-produced .o with features the toy writer lacks."""
+
+    FIXTURE = pathlib.Path(__file__).parent / "testdata" / "gnu-as" / "fixture.o"
+
+    def test_fixture_decodes(self):
+        obj = E.read_object(self.FIXTURE)
+        self.assertIn(".bss", obj.sections)
+        self.assertEqual(obj.sections[".bss"], bytearray(8))
+        self.assertIn((".data", 8, "R_LARCH_64", "magic", 8), obj.relocs)
+        self.assertIn((".data", 16, "R_LARCH_32", "magic", 0), obj.relocs)
+        self.assertIn((".text", 0, "RELAX", None, 0), obj.relocs)
+
+    def test_fixture_links_and_emulates(self):
+        import larch_emu
+        import linker_loongarch as ll
+
+        obj = E.read_object(self.FIXTURE)
+        image, symaddr, layout = ll.link([obj], ll.BASE)
+        ll.verify(image, ll.BASE, [obj], layout, symaddr)
+        self.assertEqual(larch_emu.run(image, symaddr["_start"] - ll.BASE), 7)
+        # .quad magic + 8 patched with the linker's final magic address + 8
+        ref_off = symaddr["magic_ref"] - ll.BASE
+        self.assertEqual(
+            int.from_bytes(image[ref_off : ref_off + 8], "little"),
+            symaddr["magic"] + 8,
+        )
+        # .word magic patched as a 32-bit absolute
+        word_off = symaddr["magic_word"] - ll.BASE
+        self.assertEqual(
+            int.from_bytes(image[word_off : word_off + 4], "little"),
+            symaddr["magic"] & 0xFFFFFFFF,
+        )
+        # .bss symbol is present, after .data, and zeroed in the toy image
+        self.assertGreater(symaddr["bss_value"], symaddr["magic_word"])
+        bss_off = symaddr["bss_value"] - ll.BASE
+        self.assertEqual(image[bss_off : bss_off + 8], bytes(8))
 
 
 class TestEndToEnd(unittest.TestCase):

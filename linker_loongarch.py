@@ -163,7 +163,7 @@ class LinkError(Exception):
 
 
 Symbol = tuple[str, str | None, int, int]  # (kind, section|None, value, size)
-Reloc = tuple[str, int, str, str | None]  # (section, offset, kind, symbol|None)
+Reloc = tuple[str, int, str, str | None, int]  # (section, offset, kind, symbol, addend)
 
 
 @dataclass
@@ -224,8 +224,11 @@ def parse_object(text: str, name: str) -> Object:
             size = int(tok[5], 0) if len(tok) > 5 else 0
             obj.symbols[tok[1]] = (tok[2], sec, int(tok[4], 0), size)
         elif tok[0] == "REL":
-            # 5 tokens: REL sec off KIND sym ; 4 tokens (RELAX marker): no sym
-            obj.relocs.append((tok[1], int(tok[2], 0), tok[3], tok[4] if len(tok) > 4 else None))
+            # REL sec off KIND sym [addend]; RELAX marker may omit the symbol
+            addend = int(tok[5], 0) if len(tok) > 5 else 0
+            obj.relocs.append(
+                (tok[1], int(tok[2], 0), tok[3], tok[4] if len(tok) > 4 else None, addend)
+            )
         elif tok[0] == "ALIGN":
             # ALIGN sec off alignment [max_bytes]
             sec, off = tok[1], int(tok[2], 0)
@@ -457,19 +460,27 @@ def try_relax_one(objects, layout, symaddr, *, pass_no=0, log=None):
             )
 
     for o in objects:
-        for sec, roff, kind, sym in list(o.relocs):
+        for sec, roff, kind, sym, lo_add in list(o.relocs):
             if kind not in ("PCALA_LO12", "GOT_PC_LO12"):
                 continue
-            if not any(s == sec and r == roff and k == "RELAX" for s, r, k, _ in o.relocs):
+            if not any(s == sec and r == roff and k == "RELAX" for s, r, k, _, _ in o.relocs):
                 continue  # not marked relaxable
             if not any(
                 s == sec and r == roff - 4 and k in ("PCALA_HI20", "GOT_PC_HI20")
-                for s, r, k, _ in o.relocs
+                for s, r, k, _, _ in o.relocs
             ):
                 raise LinkError(
                     f"{o.name}: RELAX at {sec}+{roff:#x} without "
                     f"a paired HI20 at {sec}+{roff - 4:#x}"
                 )
+            hi_add = next(
+                a
+                for s, r, k, _, a in o.relocs
+                if s == sec and r == roff - 4 and k in ("PCALA_HI20", "GOT_PC_HI20")
+            )
+            if hi_add != 0 or lo_add != 0:
+                note("skip", None, None, "non-zero addend in relaxable pair")
+                continue
             pc = (
                 layout.offs[(o.name, sec)]
                 + roff
@@ -523,12 +534,12 @@ def _apply_relax(o, sec, roff):
     # surviving relocation is plain PCREL20_S2 and the slot can die).
     new_kind = "PCREL20_S2"
     out = []
-    for s, r, k, sy in o.relocs:
+    for s, r, k, sy, add in o.relocs:
         if s == sec and (r == roff or r == roff - 4):
             if r == roff and k in ("PCALA_LO12", "GOT_PC_LO12"):
-                out.append((s, r - 4, new_kind, sy))  # survives, rewritten
+                out.append((s, r - 4, new_kind, sy, add))  # survives, rewritten
             continue  # HI20 / RELAX dropped
-        out.append((s, r - 4 if s == sec and r > roff else r, k, sy))
+        out.append((s, r - 4 if s == sec and r > roff else r, k, sy, add))
     o.relocs = out
     o.symbols = {
         n: (k2, s2, v - 4 if s2 == sec and v >= roff else v, z)
@@ -601,7 +612,7 @@ def link_once(objects, base, defs, commons, locs, *, align_pass=0, align_log=Non
             merged.setdefault(sec, []).append((o.name, data))
     got_ord, seen_g = [], set()
     for o in objects:  # GOT/PLT slots in first-use order
-        for _, _, kind, sym in o.relocs:
+        for _, _, kind, sym, _ in o.relocs:
             if kind in ("GOT_PC_HI20", "GOT_PC_LO12") and sym not in seen_g:
                 seen_g.add(sym)
                 got_ord.append(sym)
@@ -658,7 +669,7 @@ def link_once(objects, base, defs, commons, locs, *, align_pass=0, align_log=Non
     applied, slots = [], []
     for o in objects:
         olocs = locs.get(o.name, {})
-        for sec, roff, kind, sym in o.relocs:
+        for sec, roff, kind, sym, addend in o.relocs:
             shift = align_shift(align_delta[(o.name, sec)], roff)
             site = offs[(o.name, sec)] + roff - shift  # r_offset after ALIGN
             if kind in ("GOT_PC_HI20", "GOT_PC_LO12"):
@@ -677,11 +688,13 @@ def link_once(objects, base, defs, commons, locs, *, align_pass=0, align_log=Non
                 "PCALA_LO12",
                 "B26",
                 "R_LARCH_64",
+                "R_LARCH_32",
                 "PCREL20_S2",
             ):
                 raise LinkError(f"{o.name}: unknown relocation kind {kind}")
             if target is None:
                 raise LinkError(f"{o.name}: {kind} for undefined symbol '{sym}'")
+            target += addend
             img_off = site - base
             if kind == "PCREL20_S2":
                 disp = target - site
@@ -719,6 +732,11 @@ def link_once(objects, base, defs, commons, locs, *, align_pass=0, align_log=Non
                 insn = int.from_bytes(image[img_off : img_off + 4], "little")
                 insn |= ((field & 0xFFFF) << 10) | ((field >> 16) & 0x3FF)
                 image[img_off : img_off + 4] = insn.to_bytes(4, "little")
+            elif kind == "R_LARCH_32":
+                if not -(1 << 31) <= target < (1 << 32):
+                    raise LinkError(f"R_LARCH_32 overflow for '{sym}' at {site:#x}")
+                field = target & 0xFFFFFFFF
+                image[img_off : img_off + 4] = field.to_bytes(4, "little")
             else:  # R_LARCH_64: word64 S + A
                 field = target & MASK
                 image[img_off : img_off + 8] = field.to_bytes(8, "little")
@@ -790,8 +808,14 @@ def verify(image, base, objects, layout, symaddr):
         w = int.from_bytes(image[site - base : site - base + 4], "little")
         return (w >> lo) & ((1 << (hi - lo + 1)) - 1)
 
+    locs = {}
     for o in objects:
-        for sec, roff, kind, sym in o.relocs:
+        for n, (kind, sec, val, _) in o.symbols.items():
+            if kind == "L" and sec is not None:
+                locs.setdefault(o.name, {})[n] = (sec, val)
+
+    for o in objects:
+        for sec, roff, kind, sym, addend in o.relocs:
             site = (
                 layout.offs[(o.name, sec)]
                 + roff
@@ -799,27 +823,68 @@ def verify(image, base, objects, layout, symaddr):
             )
             if kind in ("PCALA_HI20", "GOT_PC_HI20"):
                 target = symaddr[sym] if kind == "PCALA_HI20" else layout.got[sym]
+                target += addend
                 assert field_at(site, 5, 24) == pcrel_page_field(target, site) & 0xFFFFF, (
                     f"patch for '{sym}' ({kind}) at {site:#x}"
                 )
             elif kind in ("PCALA_LO12", "GOT_PC_LO12"):
                 target = symaddr[sym] if kind == "PCALA_LO12" else layout.got[sym]
+                target += addend
                 assert field_at(site, 10, 21) == target & 0xFFF, (
                     f"patch for '{sym}' ({kind}) at {site:#x}"
                 )
             elif kind == "B26":
-                disp = symaddr[sym] - site
+                target = symaddr.get(sym)
+                if target is None:
+                    ls, lv = locs[o.name][sym]
+                    target = (
+                        layout.offs[(o.name, ls)]
+                        + lv
+                        - align_shift(layout.align_delta[(o.name, ls)], lv)
+                    )
+                target += addend
+                disp = target - site
                 field = (disp >> 2) & 0x3FFFFFF
                 assert field_at(site, 0, 25) == ((field & 0xFFFF) << 10) | (
                     (field >> 16) & 0x3FF
                 ), f"patch for '{sym}' (B26) at {site:#x}"
             elif kind == "PCREL20_S2":
-                assert field_at(site, 5, 24) == ((symaddr[sym] - site) >> 2) & 0xFFFFF, (
+                target = symaddr.get(sym)
+                if target is None:
+                    ls, lv = locs[o.name][sym]
+                    target = (
+                        layout.offs[(o.name, ls)]
+                        + lv
+                        - align_shift(layout.align_delta[(o.name, ls)], lv)
+                    )
+                target += addend
+                assert field_at(site, 5, 24) == ((target - site) >> 2) & 0xFFFFF, (
                     f"patch for '{sym}' (PCREL20_S2) at {site:#x}"
                 )
+            elif kind == "R_LARCH_32":
+                target = symaddr.get(sym)
+                if target is None:
+                    ls, lv = locs[o.name][sym]
+                    target = (
+                        layout.offs[(o.name, ls)]
+                        + lv
+                        - align_shift(layout.align_delta[(o.name, ls)], lv)
+                    )
+                target += addend
+                w = int.from_bytes(image[site - base : site - base + 4], "little")
+                assert w == target & 0xFFFFFFFF, f"patch for '{sym}' (R_LARCH_32) at {site:#x}"
             else:  # R_LARCH_64
+                target = symaddr.get(sym)
+                if target is None:
+                    ls, lv = locs[o.name][sym]
+                    target = (
+                        layout.offs[(o.name, ls)]
+                        + lv
+                        - align_shift(layout.align_delta[(o.name, ls)], lv)
+                    )
+                target += addend
                 w = int.from_bytes(image[site - base : site - base + 8], "little")
-                assert w == symaddr[sym], f"patch for '{sym}' (R_LARCH_64) at {site:#x}"
+                assert w == target, f"patch for '{sym}' (R_LARCH_64) at {site:#x}"
     for sym, at in layout.plt.items():  # synthesized stubs
         p = at - base
         pcrel = layout.got[sym] - at
@@ -1011,6 +1076,8 @@ def main(argv=None):
                 f"  {objn} {sec}+{roff:#04x} {kind:<12} {sym:<8} "
                 f"pcaddi -> {target:#x} (delta {target - site:#x})  ok"
             )
+        elif kind == "R_LARCH_32":
+            print(f"  {objn} {sec}+{roff:#04x} {kind:<12} {sym:<8} word32={field:#x}  ok")
         elif kind == "R_LARCH_64":
             print(f"  {objn} {sec}+{roff:#04x} {kind:<12} {sym:<8} word64={field:#x}  ok")
         else:  # PLT-STUB

@@ -28,9 +28,10 @@ Grounding (LoongArch ELF ABI, loongson.github.io):
 Limitations (honest): the writer emits the subset a toy compiler needs —
 SHT_PROGBITS .text/.data, SHT_SYMTAB/.strtab, SHT_RELA per relocatable
 section, section symbols, SHN_COMMON handling; no .rela.* for .symtab
-itself, no debug sections, no .eh_frame.  The reader accepts those plus
-common real-world extras it simply ignores (shstrtab/symtab linkage is
-followed; unknown section types are skipped).
+itself, no debug sections, no .eh_frame.  The reader also accepts the
+GNU as subset used by the committed fixture: SHT_NOBITS sections, non-zero
+RELA addends, R_LARCH_32, R_LARCH_RELAX, and R_LARCH_ALIGN. Other real
+sections are ignored; TLS/extreme-code-model relocations are not decoded.
 """
 
 import pathlib
@@ -55,6 +56,7 @@ SHT_PROGBITS = 1
 SHT_SYMTAB = 2
 SHT_STRTAB = 3
 SHT_RELA = 4
+SHT_NOBITS = 8
 
 SHF_WRITE = 0x1
 SHF_ALLOC = 0x2
@@ -74,6 +76,7 @@ STT_SECTION = 3
 STT_COMMON = 10
 
 RELOC_NUM = {  # toy kind -> R_LARCH_* number (ABI table 2-17; verified)
+    "R_LARCH_32": 1,
     "R_LARCH_64": 2,
     "B26": 66,
     "PCALA_HI20": 71,
@@ -137,7 +140,7 @@ def write_object(obj: Object, path: str) -> None:
             shndx = [n for n, _ in secs].index(sec) + 1
             syms.append((name, bind, STT_NOTYPE, shndx, val, size))
         sym_idx[name] = len(syms) - 1  # index of the symbol just added
-    for _, _, _, sym in obj.relocs:  # external refs -> UNDEF
+    for _, _, _, sym, _ in obj.relocs:  # external refs -> UNDEF
         if sym is None:  # RELAX marker: no symbol
             continue
         if sym not in sym_idx:
@@ -156,7 +159,7 @@ def write_object(obj: Object, path: str) -> None:
 
     # --- relocations --------------------------------------------------------
     relas = {}  # secname -> list of RELA entries
-    for sec, roff, kind, sym in obj.relocs:
+    for sec, roff, kind, sym, addend in obj.relocs:
         if kind == "RELAX":
             relas.setdefault(sec, []).append(RELA.pack(roff, 100, 0))
             continue
@@ -165,7 +168,7 @@ def write_object(obj: Object, path: str) -> None:
         r = RELOC_NUM.get(kind)
         if r is None:
             raise LinkError(f"write_object: no ELF reloc number for {kind}")
-        relas.setdefault(sec, []).append(RELA.pack(roff, (sym_idx[sym] << 32) | r, 0))
+        relas.setdefault(sec, []).append(RELA.pack(roff, (sym_idx[sym] << 32) | r, addend))
     for al in obj.aligns:
         # r_symndx == 0: addend = alignment - 4 (binutils' no-max form).
         # r_symndx  > 0: low byte = log2(alignment), high bytes = max NOPs.
@@ -356,12 +359,15 @@ def read_object(path: str) -> Object:
     def sym_name(st_name):
         return strtab_data[st_name : strtab_data.index(b"\x00", st_name)].decode()
 
-    # sections (skip the non-progbits ones; keep ordering)
+    # sections (PROGBITS carry bytes; NOBITS become zero-filled toy sections)
     sections = {}
     order = []
     for i, shdr in enumerate(shdrs):
         if shdr[1] == SHT_PROGBITS:
             sections[shname(i)] = bytearray(data[shdr[4] : shdr[4] + shdr[5]])
+            order.append(shname(i))
+        elif shdr[1] == SHT_NOBITS:
+            sections[shname(i)] = bytearray(shdr[5])
             order.append(shname(i))
 
     # symbols -> Object symbols
@@ -405,7 +411,7 @@ def read_object(path: str) -> Object:
                 aligns.append(Align(secname, r_offset, align, max_bytes))
                 continue
             sym = None if (kind == "RELAX" or si == 0) else sym_name(syms[si][0])
-            relocs.append((secname, r_offset, kind, sym))
+            relocs.append((secname, r_offset, kind, sym, r_addend))
 
     return Object(path, sections, obj_syms, relocs, aligns)
 
@@ -441,7 +447,7 @@ def main():
             # relocation target external to this object (as real assemblers
             # do), so the read-back symbol table carries those too.
             expected_syms = dict(obj.symbols)
-            for _, _, _, sym in obj.relocs:
+            for _, _, _, sym, _ in obj.relocs:
                 if sym is not None:  # RELAX markers carry no symbol
                     expected_syms.setdefault(sym, ("G", None, 0, 0))
             assert read_back.sections == obj.sections, f"{name}: sections changed"

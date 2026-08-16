@@ -18,10 +18,10 @@ assembly text ──► larch_asm ──► object ──► linker_loongarch �
 | module | role |
 |---|---|
 | `larch_asm.py` | two-pass assembler: labels, `%pcala_hi20/lo12` and `%got_pc_hi20/lo12` relocation suffixes, `R_LARCH_RELAX` markers on every relaxable pair, `.align` in `.text` emits max NOPs + `R_LARCH_ALIGN` |
-| `linker_loongarch.py` | static linker: strong/weak/common resolution, section merging, synthesized `.plt`/`.got`/`.common`, the six relocations the toolchain emits (R_LARCH_64, PCALA_HI20/LO12, GOT_PC_HI20/LO12, B26, PCREL20_S2), `verify()` re-derives every patch, **R_LARCH_RELAX** folds `pcalau12i`+`addi/ld` pairs to `pcaddi` at a fixpoint, and **R_LARCH_ALIGN** deletes unneeded NOPs inside every layout pass |
+| `linker_loongarch.py` | static linker: strong/weak/common resolution, section merging, synthesized `.plt`/`.got`/`.common`, the relocations the toolchain emits (R_LARCH_32/64, PCALA_HI20/LO12, GOT_PC_HI20/LO12, B26, PCREL20_S2), `verify()` re-derives every patch, **R_LARCH_RELAX** folds `pcalau12i`+`addi/ld` pairs to `pcaddi` at a fixpoint, and **R_LARCH_ALIGN** deletes unneeded NOPs inside every layout pass |
 | `larch_emu.py` | 26-instruction LA64 interpreter (encodings cross-checked against QEMU's `insns.decode`), with a per-instruction tracer |
 | `larch_dis.py` | linear-sweep disassembler on the interpreter's decoder; branch targets and relaxed `pcaddi` forms resolve to symbols |
-| `elf_loongarch.py` | real ELF64-loongarch ET_REL writer + reader (recognized by `file`/`readelf`), including R_LARCH_RELAX (100), R_LARCH_ALIGN (102), and R_LARCH_PCREL20_S2 (103) |
+| `elf_loongarch.py` | real ELF64-loongarch ET_REL writer + reader (recognized by `file`/`readelf`), including R_LARCH_RELAX (100), R_LARCH_ALIGN (102), R_LARCH_PCREL20_S2 (103), NOBITS sections, and non-zero RELA addends; accepts the GNU as subset used by the demo/fixture |
 
 Everything is grounded in the primary sources, cited verbatim in the
 module docstrings: the [LoongArch ELF ABI](https://loongson.github.io/LoongArch-Documentation/LoongArch-ELF-ABI-EN.html),
@@ -76,9 +76,11 @@ relocatable files.
 
 - Instruction subset: the base integer + LA64 subset the assembler emits
   (no SIMD, no privileged instructions, no floats).
-- The linker reads the toy text format (or the bundled ELF reader), not
-  arbitrary toolchain output; relaxation covers the canonical
-  `pcalau12i`+`addi/ld` pairs and alignment NOP deletion.
+- The ELF reader accepts the GNU as subset the demo/fixture uses; it does
+  not cover debug sections, merge sections, TLS relocations, or extreme
+  code-model relocations.
+- Relaxation covers the canonical `pcalau12i`+`addi/ld` pairs and
+  alignment NOP deletion.
 
 ## License & acknowledgments
 
