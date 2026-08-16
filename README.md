@@ -4,6 +4,10 @@ A small LoongArch (LA64) toolchain written from scratch in pure Python —
 stdlib only, no dependencies. Assembler → linker → emulator, with a
 disassembler and real ELF64-loongarch object-file I/O around them.
 
+## Blog
+
+- [LoongArch linker relaxation: the pcaddi fold](https://chengjilai.github.io/posts/2026-08-16-loongarch-relaxation.html) — the design write-up behind the relaxation pass.
+
 ```
 assembly text ──► larch_asm ──► object ──► linker_loongarch ──► image ──► larch_emu
                                       ▲                                      │
