@@ -686,6 +686,8 @@ def link_once(objects, base, defs, commons, locs, *, align_pass=0, align_log=Non
                 "GOT_PC_LO12",
                 "PCALA_HI20",
                 "PCALA_LO12",
+                "ABS_HI20",
+                "ABS_LO12",
                 "B16",
                 "B26",
                 "R_LARCH_64",
@@ -713,6 +715,16 @@ def link_once(objects, base, defs, commons, locs, *, align_pass=0, align_log=Non
                     raise LinkError(f"{kind} overflow for '{sym}' at {site:#x}")
                 insn = int.from_bytes(image[img_off : img_off + 4], "little")
                 insn |= (field & 0xFFFFF) << 5  # si20 -> bits [24:5]
+                image[img_off : img_off + 4] = insn.to_bytes(4, "little")
+            elif kind == "ABS_HI20":
+                field = (target >> 12) & 0xFFFFF  # S+A bits [31:12]
+                insn = int.from_bytes(image[img_off : img_off + 4], "little")
+                insn |= field << 5
+                image[img_off : img_off + 4] = insn.to_bytes(4, "little")
+            elif kind == "ABS_LO12":
+                field = target & 0xFFF  # S+A bits [11:0]
+                insn = int.from_bytes(image[img_off : img_off + 4], "little")
+                insn |= field << 10
                 image[img_off : img_off + 4] = insn.to_bytes(4, "little")
             elif kind in ("PCALA_LO12", "GOT_PC_LO12"):
                 field = target & 0xFFF  # si12 -> bits [21:10]
@@ -843,6 +855,32 @@ def verify(image, base, objects, layout, symaddr):
                 target += addend
                 assert field_at(site, 10, 21) == target & 0xFFF, (
                     f"patch for '{sym}' ({kind}) at {site:#x}"
+                )
+            elif kind == "ABS_HI20":
+                target = symaddr.get(sym)
+                if target is None:
+                    ls, lv = locs[o.name][sym]
+                    target = (
+                        layout.offs[(o.name, ls)]
+                        + lv
+                        - align_shift(layout.align_delta[(o.name, ls)], lv)
+                    )
+                target += addend
+                assert field_at(site, 5, 24) == (target >> 12) & 0xFFFFF, (
+                    f"patch for '{sym}' (ABS_HI20) at {site:#x}"
+                )
+            elif kind == "ABS_LO12":
+                target = symaddr.get(sym)
+                if target is None:
+                    ls, lv = locs[o.name][sym]
+                    target = (
+                        layout.offs[(o.name, ls)]
+                        + lv
+                        - align_shift(layout.align_delta[(o.name, ls)], lv)
+                    )
+                target += addend
+                assert field_at(site, 10, 21) == target & 0xFFF, (
+                    f"patch for '{sym}' (ABS_LO12) at {site:#x}"
                 )
             elif kind == "B16":
                 target = symaddr.get(sym)
@@ -1080,12 +1118,12 @@ def main(argv=None):
     for off in range(0, len(image), 16):
         print(f"  {BASE + off:#08x}: " + " ".join(f"{b:02x}" for b in image[off : off + 16]))
     for objn, sec, roff, kind, sym, site, target, field in layout.applied:
-        if kind in ("PCALA_HI20", "GOT_PC_HI20"):
+        if kind in ("PCALA_HI20", "GOT_PC_HI20", "ABS_HI20"):
             print(
                 f"  {objn} {sec}+{roff:#04x} {kind:<12} {sym:<8} "
                 f"hi={field:#x} ({target:#x} vs PC {site:#x})  ok"
             )
-        elif kind in ("PCALA_LO12", "GOT_PC_LO12"):
+        elif kind in ("PCALA_LO12", "GOT_PC_LO12", "ABS_LO12"):
             print(
                 f"  {objn} {sec}+{roff:#04x} {kind:<12} {sym:<8} "
                 f"lo={field:#03x} (target {target:#x})  ok"

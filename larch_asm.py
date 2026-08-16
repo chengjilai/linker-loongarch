@@ -36,6 +36,8 @@ Relocation suffixes (the immediate of the matching instruction):
   addi.d/ld.d/ld.w/st.d/st.w
       rd, rj, %got_pc_lo12(sym)     -> REL GOT_PC_LO12
   b/bl label                        -> REL B26 (numeric offsets allowed)
+  lu12i.w rd, %abs_hi20(sym)        -> REL ABS_HI20
+  ori rd, rj, %abs_lo12(sym)        -> REL ABS_LO12
   .quad label                       -> REL R_LARCH_64
 
 Relaxation: every %pcala_lo12 / %got_pc_lo12 pair also emits an
@@ -128,6 +130,8 @@ REL_KIND = {  # suffix -> (reloc kind, allowed instructions)
     "pcala_lo12": ("PCALA_LO12", ("addi.d", "addi.w", "ld.d", "ld.w", "st.d", "st.w")),
     "got_pc_hi20": ("GOT_PC_HI20", ("pcalau12i",)),
     "got_pc_lo12": ("GOT_PC_LO12", ("addi.d", "addi.w", "ld.d", "ld.w", "st.d", "st.w")),
+    "abs_hi20": ("ABS_HI20", ("lu12i.w",)),
+    "abs_lo12": ("ABS_LO12", ("ori",)),
 }
 
 NOP = 0x03400000  # andi r0, r0, 0
@@ -223,7 +227,7 @@ def encode_instruction(
             kind2 = REL_KIND.get(m.group(1))
             if kind2 is None or mnem not in kind2[1]:
                 raise AsmError(f"{where}: %{m.group(1)} not allowed here")
-            if unsigned:
+            if unsigned and kind2[0] != "ABS_LO12":
                 raise AsmError(f"{where}: {mnem} takes a number, not a relocation")
             relocs.append((None, kind2[0], m.group(2)))
             if kind2[0] in ("PCALA_LO12", "GOT_PC_LO12"):

@@ -80,6 +80,8 @@ RELOC_NUM = {  # toy kind -> R_LARCH_* number (ABI table 2-17; verified)
     "R_LARCH_64": 2,
     "B16": 64,
     "B26": 66,
+    "ABS_HI20": 67,
+    "ABS_LO12": 68,
     "PCALA_HI20": 71,
     "PCALA_LO12": 72,
     "GOT_PC_HI20": 75,

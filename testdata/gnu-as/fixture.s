@@ -7,6 +7,8 @@ _start:
   addi.d $r4, $r0, 99
 done:
   addi.d $r4, $r4, 0
+  lu12i.w $r5, %abs_hi20(magic)
+  ori $r5, $r5, %abs_lo12(magic)
   b image_end
 
 .data

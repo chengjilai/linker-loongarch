@@ -75,6 +75,20 @@ class TestRelocations(unittest.TestCase):
         # low 16 bits of the field sit at bits 10..25
         self.assertEqual((word >> 10) & 0xFFFF, 2)
 
+    def test_abs_hi_lo_pair(self):
+        # lu12i.w at BASE, ori at BASE+4: materialize target = BASE+0x1234
+        image, symaddr, _ = link_texts(
+            "SEC .text\n00 00 00 00\n00 00 00 00\n"
+            "SYM target G .text 0x1234\n"
+            "REL .text 0 ABS_HI20 target\n"
+            "REL .text 4 ABS_LO12 target\n"
+        )
+        target = symaddr["target"]
+        hi = int.from_bytes(image[0:4], "little")
+        lo = int.from_bytes(image[4:8], "little")
+        self.assertEqual((hi >> 5) & 0xFFFFF, (target >> 12) & 0xFFFFF)
+        self.assertEqual((lo >> 10) & 0xFFF, target & 0xFFF)
+
     def test_b16_branch(self):
         # beq at BASE to BASE+8: offs16 field = 8 >> 2 = 2, bits [25:10]
         image, symaddr, _ = link_texts(

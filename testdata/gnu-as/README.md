@@ -11,4 +11,5 @@ not require a LoongArch cross assembler.
 
 The fixture intentionally covers the real-object cases the toy writer
 does not emit: R_LARCH_RELAX markers from `la.local`, a local-label R_LARCH_B16
-branch, SHT_NOBITS `.bss`, R_LARCH_32, and non-zero RELA addends.
+branch, R_LARCH_ABS_HI20/LO12 address materialization, SHT_NOBITS
+`.bss`, R_LARCH_32, and non-zero RELA addends.

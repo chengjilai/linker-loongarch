@@ -182,6 +182,16 @@ class TestRelocs(unittest.TestCase):
         self.assertIn("REL .data 0x10 R_LARCH_32 magic", obj)
         self.assertIn("REL .data 0x14 R_LARCH_32 magic -4", obj)
 
+    def test_abs_hi_lo_pair(self):
+        rels = self._relocs(".text\nlu12i.w r4, %abs_hi20(magic)\nori r4, r4, %abs_lo12(magic)\n")
+        self.assertEqual(
+            rels,
+            [
+                "REL .text 0 ABS_HI20 magic",
+                "REL .text 4 ABS_LO12 magic",
+            ],
+        )
+
     def test_quad_label(self):
         obj = asm.assemble(".data\n.quad magic\n", "t.obj")
         self.assertIn("REL .data 0 R_LARCH_64 magic", obj)
