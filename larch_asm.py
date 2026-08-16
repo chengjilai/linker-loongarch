@@ -17,6 +17,8 @@ cross-checked against qemu's target/loongarch/insns.decode:
 Syntax (one instruction or directive per line; `//` comments):
   label:                      defines a label (local unless .global)
   mnemonic rd, rj, src        src = register | number | %reloc(sym)
+  la.local rd, sym            pcalau12i + addi.d %pc_hi20/%pc_lo12 pair
+  la.global rd, sym           pcalau12i + ld.d %got_pc_hi20/%got_pc_lo12 pair
   .text / .data               switch output section
   .global name                export a label (SYM kind G)
   .common name, size[, align] tentative definition (SYM kind C)
@@ -383,6 +385,27 @@ def assemble(src: str, name: str = "a.obj") -> str:
             if len(tok) > 1
             else []
         )
+        if mnem in ("la.local", "la.global"):
+            if len(ops) != 2 or not ops[1].isidentifier():
+                raise AsmError(f"{where}: {mnem} rd, symbol")
+            rd, sym = ops
+            if mnem == "la.local":
+                pair = (
+                    ("pcalau12i", [rd, f"%pcala_hi20({sym})"]),
+                    ("addi.d", [rd, rd, f"%pcala_lo12({sym})"]),
+                )
+            else:
+                pair = (
+                    ("pcalau12i", [rd, f"%got_pc_hi20({sym})"]),
+                    ("ld.d", [rd, rd, f"%got_pc_lo12({sym})"]),
+                )
+            off = len(sections[at()])
+            for step, (imnem, iops) in enumerate(pair):
+                iword, irels = encode_instruction(imnem, iops, where)
+                sections[at()].extend(iword)
+                for _, kind, isym in irels:
+                    relocs.append((at(), off + 4 * step, kind, isym))
+            continue
         if mnem not in ENC:
             raise AsmError(f"{where}: unknown instruction {mnem!r}")
         off = len(sections[at()])
@@ -439,14 +462,12 @@ PROG_A = """\
 .text
 _start:
 .global _start
-    pcalau12i r4,  %pcala_hi20(magic)   // la r4, magic (relaxable pair)
-    addi.d    r4,  r4, %pcala_lo12(magic)
+    la.local  r4,  magic               // relaxable PCALA pair
     ld.d      r4,  r4, 0                 // r4 = magic
     addi.d    r4,  r4, 5
     bl        compute
     addi.d    r4,  r4, 1
-    pcalau12i r13, %got_pc_hi20(helper)  // la.global r13, helper (relaxable)
-    ld.d      r13, r13, %got_pc_lo12(helper)
+    la.global r13, helper              // relaxable GOT pair
     jirl      r1,  r13, 0
     b         image_end
 .common image_end, 0, 1
@@ -459,8 +480,7 @@ PROG_B = """\
 .text
 compute:
 .global compute
-    pcalau12i r4,  %pcala_hi20(bonus)   // la r4, bonus (relaxable pair)
-    addi.d    r4,  r4, %pcala_lo12(bonus)
+    la.local  r4,  bonus               // relaxable PCALA pair
     ld.d      r4,  r4, 0                 // r4 = bonus
     addi.d    r4,  r4, 2
     jirl      r0,  r1, 0

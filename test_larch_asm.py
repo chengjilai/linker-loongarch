@@ -123,6 +123,38 @@ class TestRelocs(unittest.TestCase):
             ],
         )
 
+    def test_la_macros_expand(self):
+        obj = asm.assemble(".text\nla.local r4, x\nla.global r13, y\n", "t.obj")
+        lines = obj.splitlines()
+        self.assertEqual(lines[1], "SEC .text")
+        self.assertEqual(
+            lines[2].split(),
+            [
+                "04",
+                "00",
+                "00",
+                "1a",
+                "84",
+                "00",
+                "c0",
+                "02",
+                "0d",
+                "00",
+                "00",
+                "1a",
+                "ad",
+                "01",
+                "c0",
+                "28",
+            ],
+        )
+        self.assertIn("REL .text 0 PCALA_HI20 x", obj)
+        self.assertIn("REL .text 4 PCALA_LO12 x", obj)
+        self.assertIn("REL .text 4 RELAX", obj)
+        self.assertIn("REL .text 8 GOT_PC_HI20 y", obj)
+        self.assertIn("REL .text 0xc GOT_PC_LO12 y", obj)
+        self.assertIn("REL .text 0xc RELAX", obj)
+
     def test_got_pair_and_branch(self):
         rels = self._relocs(
             ".text\n"
