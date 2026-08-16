@@ -36,6 +36,7 @@ series.
 
 ```
 nix run            # link three hand-written objects, verify, emulate → a0 = 6
+nix run .# -- --trace  # add the pass-by-pass R_LARCH_RELAX fold/skip trace
 nix run .#asm      # assemble → link (relaxation on) → emulate; the objects are
                    # proven byte-identical to the hand-encoded references, and
                    # the relaxed image is 0x58 bytes vs 0x98 without relaxation
@@ -48,7 +49,8 @@ nix run .#typecheck  # ty (strict rules; modules are annotated)
 nix develop        # python3, ruff, ty
 ```
 
-No nix? `python3 -B larch_asm.py`, `python3 -B linker_loongarch.py`, the
+No nix? `python3 -B larch_asm.py`, `python3 -B linker_loongarch.py`,
+`python3 -B linker_loongarch.py --trace` for the relaxation trace, or the
 test suites via `python3 -B -m unittest -v test_linker_loongarch test_larch_emu
 test_larch_asm test_larch_dis test_elf_loongarch`.
 

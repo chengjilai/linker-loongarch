@@ -13,10 +13,10 @@ import unittest
 import linker_loongarch as ll
 
 
-def link_texts(*texts):
+def link_texts(*texts, relax_log=None):
     """Parse + link the given object texts; return (image, symaddr, layout)."""
     objects = [ll.parse_object(t, f"obj{i}") for i, t in enumerate(texts)]
-    return ll.link(objects, ll.BASE)
+    return ll.link(objects, ll.BASE, relax_log=relax_log)
 
 
 class TestParse(unittest.TestCase):
@@ -227,12 +227,121 @@ class TestRelaxation(unittest.TestCase):
             self.assertLess(len(img), len(img2))
 
 
+class TestRelaxationTrace(unittest.TestCase):
+    def test_fold_is_recorded(self):
+        log = []
+        image, _, _ = link_texts(TestRelaxation.RELAX_PAIR, relax_log=log)
+        self.assertEqual(len(log), 1)
+        step = log[0]
+        self.assertEqual(step.pass_no, 1)
+        self.assertEqual(step.obj, "obj0")
+        self.assertEqual(step.section, ".text")
+        self.assertEqual(step.offset, 4)
+        self.assertEqual(step.kind, "PCALA_LO12")
+        self.assertEqual(step.sym, "x")
+        self.assertEqual(step.decision, "fold")
+        self.assertIsNone(step.reason)
+        self.assertEqual(step.delta, 8)
+        # folded word is pcaddi; the surviving relocation is re-applied
+        self.assertEqual((int.from_bytes(image[0:4], "little") >> 25), 0x0C)
+
+    def test_skip_reasons_are_recorded(self):
+        # out of range
+        log = []
+        link_texts(
+            "SEC .text\n04 00 00 1a\n84 00 c0 02\n"
+            "SEC .big\n" + "00\n" * 0x300000 + "\n"
+            "SYM x G .big 0x300000\n"
+            "REL .text 0 PCALA_HI20 x\n"
+            "REL .text 4 PCALA_LO12 x\n"
+            "REL .text 4 RELAX\n",
+            relax_log=log,
+        )
+        self.assertEqual(len(log), 1)
+        self.assertEqual(log[0].decision, "skip")
+        self.assertIn("range", log[0].reason)
+
+        # non-canonical registers
+        log = []
+        link_texts(
+            "SEC .text\n0c 00 00 1a\n04 01 c0 02\n"
+            "SYM x G .text 8\n"
+            "REL .text 0 PCALA_HI20 x\n"
+            "REL .text 4 PCALA_LO12 x\n"
+            "REL .text 4 RELAX\n",
+            relax_log=log,
+        )
+        self.assertEqual(len(log), 1)
+        self.assertEqual(log[0].decision, "skip")
+        self.assertIn("register", log[0].reason)
+
+        # wrong opcode shape for a PCALA pair
+        log = []
+        link_texts(
+            "SEC .text\n04 00 00 1a\n84 00 c0 28\n"
+            "SYM x G .text 8\n"
+            "REL .text 0 PCALA_HI20 x\n"
+            "REL .text 4 PCALA_LO12 x\n"
+            "REL .text 4 RELAX\n",
+            relax_log=log,
+        )
+        self.assertEqual(len(log), 1)
+        self.assertEqual(log[0].decision, "skip")
+        self.assertIn("shape", log[0].reason)
+
+    def test_demo_trace_folds_three_pairs(self):
+        import larch_asm
+
+        objects = [
+            (n, larch_asm.assemble(s, n))
+            for s, n in (
+                (larch_asm.PROG_A, "a.obj"),
+                (larch_asm.PROG_B, "b.obj"),
+                (larch_asm.PROG_C, "c.obj"),
+            )
+        ]
+        objs = [ll.parse_object(t, n) for n, t in objects]
+        log = []
+        ll.link(objs, ll.BASE, relax_log=log)
+        folds = [s for s in log if s.decision == "fold"]
+        self.assertEqual(len(folds), 3)
+        self.assertEqual([s.pass_no for s in folds], [1, 2, 3])
+        self.assertEqual(
+            {(s.obj, s.kind) for s in folds},
+            {
+                ("a.obj", "PCALA_LO12"),
+                ("a.obj", "GOT_PC_LO12"),
+                ("b.obj", "PCALA_LO12"),
+            },
+        )
+        self.assertTrue(all(s.target is not None for s in folds))
+
+    def test_got_trace_targets_symbol_not_slot(self):
+        log = []
+        obj_a = (
+            "SEC .text\n04 00 00 1a\n84 00 c0 28\n"
+            "SYM f G - 0\n"
+            "REL .text 0 GOT_PC_HI20 f\n"
+            "REL .text 4 GOT_PC_LO12 f\n"
+            "REL .text 4 RELAX\n"
+        )
+        obj_b = "SEC .text\n00 00 00 00\nSYM f G .text 0\n"
+        _, symaddr, layout = link_texts(obj_a, obj_b, relax_log=log)
+        self.assertEqual(len(log), 1)
+        step = log[0]
+        self.assertEqual(step.decision, "fold")
+        self.assertEqual(step.kind, "GOT_PC_LO12")
+        self.assertEqual(step.target, symaddr["f"])
+        self.assertNotEqual(step.target, layout.got.get("f"))
+        self.assertNotIn("f", layout.got)  # the slot died with the pair
+
+
 class TestEndToEnd(unittest.TestCase):
     def test_demo_run(self):
         """The full demo pipeline: link, verify, emulate -> a0 == 6."""
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
-            ll.main()
+            ll.main([])
         out = buf.getvalue()
         self.assertIn("the emulated run agrees", out)
         self.assertIn("a0=6", out)

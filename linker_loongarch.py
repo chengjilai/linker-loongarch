@@ -137,6 +137,7 @@ Run:  python3 -B linker_loongarch.py
       (tests: python3 -B -m unittest -v test_linker_loongarch)
 """
 
+import sys
 from dataclasses import dataclass
 
 import larch_emu  # the emulator; see the run() contract in the docstring
@@ -272,7 +273,24 @@ def pcrel_page_field(target: int, pc: int) -> int:
     return hi >> 12  # exact: hi is a multiple of 0x1000
 
 
-def try_relax_one(objects, layout, symaddr):
+@dataclass
+class RelaxStep:
+    """One relaxation decision (fold or skip) in the layout/apply/relax loop."""
+
+    pass_no: int
+    obj: str
+    section: str
+    offset: int  # LO12 offset in the section, before the fold
+    kind: str  # PCALA_LO12 | GOT_PC_LO12
+    sym: str | None
+    site: int  # LO12 address in the current layout
+    target: int | None  # address the folded pcaddi would reach
+    delta: int | None  # target - (site - 4), the folded pcaddi's delta
+    decision: str  # "fold" | "skip"
+    reason: str | None = None  # why a skip happened; None for folds
+
+
+def try_relax_one(objects, layout, symaddr, *, pass_no=0, log=None):
     """Fold one relaxable pcalau12i+addi/ld pair (R_LARCH_RELAX semantics).
 
     The transformation is lld's (lld/ELF/Arch/LoongArch.cpp,
@@ -285,16 +303,44 @@ def try_relax_one(objects, layout, symaddr):
 
     Conditions (same source): the pair must be canonical (pcalau12i's rd ==
     the second instruction's rj == its rd), the delta must be 4-aligned and
-    fit pcaddi's signed 22-bit range.  On a fold the HI20 instruction (4
-    bytes earlier) is deleted, the LO12 word is rewritten as pcaddi, the
-    HI20 + RELAX relocations are removed, and the LO12 relocation is
-    REWRITTEN as PCREL20_S2 — it stays in the object so every later
-    layout pass re-applies the delta with the final addresses (lld keeps
-    the relocation as R_LARCH_PCREL20_S2; values are never frozen).
+    fit pcaddi's signed 22-bit range, and GOT pairs fold only for symbols
+    that are link-time defined (lld's `!rHi20.sym->isDefined()` check).
+    Both PCALA and GOT folds target the symbol's own address (lld computes
+    dest = sym->getVA()), never the GOT slot: the original GOT pair loads
+    the slot's value, while pcaddi yields the slot's address.
+
+    On a fold the HI20 instruction (4 bytes earlier) is deleted, the LO12
+    word is rewritten as pcaddi, the HI20 + RELAX relocations are removed,
+    and the LO12 relocation is REWRITTEN as PCREL20_S2 — it stays in the
+    object so every later layout pass re-applies the delta with the final
+    addresses (lld keeps the relocation as R_LARCH_PCREL20_S2; values are
+    never frozen).
+
     Returns True when something changed; the caller re-lays-out and
     re-checks (relaxation is a fixpoint: each fold shrinks the image, and
-    later folds may become possible).
+    later folds may become possible). If `log` is a list, every candidate
+    seen before this pass's first fold is appended as a RelaxStep.
     """
+    defined = {n for o in objects for n, (_, sec, _, _) in o.symbols.items() if sec is not None}
+
+    def note(decision, target, delta, reason=None):
+        if log is not None:
+            log.append(
+                RelaxStep(
+                    pass_no,
+                    o.name,
+                    sec,
+                    roff,
+                    kind,
+                    sym,
+                    pc,
+                    target,
+                    delta,
+                    decision,
+                    reason,
+                )
+            )
+
     for o in objects:
         for sec, roff, kind, sym in list(o.relocs):
             if kind not in ("PCALA_LO12", "GOT_PC_LO12"):
@@ -310,22 +356,32 @@ def try_relax_one(objects, layout, symaddr):
                     f"a paired HI20 at {sec}+{roff - 4:#x}"
                 )
             pc = layout.offs[(o.name, sec)] + roff
-            target = layout.got.get(sym) if kind == "GOT_PC_LO12" else symaddr.get(sym)
+            if kind == "GOT_PC_LO12":
+                if sym not in defined:
+                    note("skip", None, None, "GOT target is not link-time defined")
+                    continue
+                target = symaddr.get(sym)
+            else:
+                target = symaddr.get(sym)
             if target is None:
                 raise LinkError(f"{o.name}: RELAX for undefined symbol '{sym}'")
             delta = target - (pc - 4)  # the folded pcaddi's own PC
             if (delta & 3) or not -(1 << 21) <= delta < (1 << 21):
-                continue  # outside pcaddi's 22-bit range
+                note("skip", target, delta, "outside pcaddi's 22-bit range")
+                continue
             # lld's checks: pcalau12i rd == insn rj == insn rd, and the
             # opcode shape (PCALA pairs must end in addi.w/d; GOT pairs in
             # ld.w/d — an address-take vs a load)
             hi = int.from_bytes(o.sections[sec][roff - 4 : roff], "little")
             lo = int.from_bytes(o.sections[sec][roff : roff + 4], "little")
             if hi & 0x1F != (lo >> 5) & 0x1F or (lo >> 5) & 0x1F != lo & 0x1F:
+                note("skip", target, delta, "non-canonical registers")
                 continue
             want = (0x0A, 0x0B) if kind == "PCALA_LO12" else (0xA2, 0xA3)
             if (lo >> 22) not in want:
+                note("skip", target, delta, "wrong opcode shape for the pair")
                 continue
+            note("fold", target, delta)
             _apply_relax(o, sec, roff)
             return True
     return False
@@ -361,18 +417,25 @@ def _apply_relax(o, sec, roff):
     }
 
 
-def link(objects, base=BASE, *, relax=True):
+def link(objects, base=BASE, *, relax=True, relax_log=None):
     """Link objects into one image. Returns (image, symaddr, layout).
 
     With relax=True (the default, like real ld) the layout/apply/relax
     cycle repeats to a fixpoint: each fold of a relaxable pair shrinks a
     section, addresses shift, and further folds may become possible.
+
+    If `relax_log` is a list, the relaxation loop appends a RelaxStep for
+    every candidate considered (folds and skips, with the skip reason).
     """
     defs, commons, locs = resolve(objects)
     image, symaddr, layout = link_once(objects, base, defs, commons, locs)
     if not relax:
         return image, symaddr, layout
-    while try_relax_one(objects, layout, symaddr):
+    pass_no = 0
+    while True:
+        pass_no += 1
+        if not try_relax_one(objects, layout, symaddr, pass_no=pass_no, log=relax_log):
+            break
         image, symaddr, layout = link_once(objects, base, defs, commons, locs)
     return image, symaddr, layout
 
@@ -664,7 +727,11 @@ REL .data 8 R_LARCH_64 magic
 """
 
 
-def main():
+def main(argv=None):
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if argv and argv != ["--trace"]:
+        raise SystemExit(f"unknown arguments: {' '.join(argv)}")
+    trace = "--trace" in argv
     a, b, c = (
         parse_object(t, n)
         for t, n in ((OBJ_A, "prog_a.obj"), (OBJ_B, "prog_b.obj"), (OBJ_C, "prog_c.obj"))
@@ -716,7 +783,8 @@ def main():
     # and the psABI's GOT offsets are 32-bit by construction.
 
     print("\n== 2. layout (3 objects, sections merged by name) ==")
-    image, symaddr, layout = link([a, b, c])
+    relax_log = [] if trace else None
+    image, symaddr, layout = link([a, b, c], relax_log=relax_log)
     for o in (a, b, c):
         for sec, data in o.sections.items():
             print(f"  {layout.offs[(o.name, sec)]:#08x}  {sec:<6} {len(data):>3} B  {o.name}")
@@ -755,6 +823,11 @@ def main():
                 f"  {objn} {sec}+{roff:#04x} {kind:<12} {sym:<8} "
                 f"offs26={field:#x} ({target:#x} - {site:#x})  ok"
             )
+        elif kind == "PCREL20_S2":
+            print(
+                f"  {objn} {sec}+{roff:#04x} {kind:<12} {sym:<8} "
+                f"pcaddi -> {target:#x} (delta {target - site:#x})  ok"
+            )
         elif kind == "R_LARCH_64":
             print(f"  {objn} {sec}+{roff:#04x} {kind:<12} {sym:<8} word64={field:#x}  ok")
         else:  # PLT-STUB
@@ -780,6 +853,23 @@ def main():
     print("    the GOT (+3) -> b image_end, PC runs off the image -> a0=6")
     print("  the emulated run agrees.")
 
+    if trace and relax_log is not None:
+        print("\n== 5. relaxation trace ==")
+        if not relax_log:
+            print("  no R_LARCH_RELAX candidate was considered")
+        for s in relax_log:
+            if s.decision == "fold":
+                print(
+                    f"  pass {s.pass_no}: FOLD {s.obj} {s.section}+{s.offset:#x} "
+                    f"{s.kind} {s.sym} -> pcaddi to {s.target:#x} "
+                    f"(delta {s.delta:#x})"
+                )
+            else:
+                print(
+                    f"  pass {s.pass_no}: SKIP {s.obj} {s.section}+{s.offset:#x} "
+                    f"{s.kind} {s.sym}: {s.reason}"
+                )
+
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main(sys.argv[1:]))
