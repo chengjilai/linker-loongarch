@@ -110,10 +110,10 @@ class TestRelocations(unittest.TestCase):
         )
         self.assertIn("helper", layout.plt)
         stub = layout.plt["helper"] - ll.BASE
-        pcalau12i = int.from_bytes(image[stub : stub + 4], "little")
+        pcaddu12i = int.from_bytes(image[stub : stub + 4], "little")
         ld_d = int.from_bytes(image[stub + 4 : stub + 8], "little")
         jirl = int.from_bytes(image[stub + 8 : stub + 12], "little")
-        self.assertEqual(pcalau12i & 0xFC000000, 0x1C000000)  # pcalau12i
+        self.assertEqual(pcaddu12i & 0xFC000000, 0x1C000000)  # pcaddu12i
         self.assertEqual(ld_d & 0xFC000000, 0x28000000)  # ld.d
         self.assertEqual(jirl & 0xFC000000, 0x4C000000)  # jirl
 
@@ -138,7 +138,7 @@ class TestRelaxation(unittest.TestCase):
     def test_pcala_pair_folds(self):
         image, _, _ = link_texts(self.RELAX_PAIR)
         word = self._word(image, 0)
-        self.assertEqual(word >> 25, 0x0E)  # pcaddi
+        self.assertEqual(word >> 25, 0x0C)  # pcaddi
         self.assertEqual(word & 0x1F, 4)  # same rd
         self.assertEqual((word >> 5) & 0xFFFFF, 2)  # delta 8 >> 2
         self.assertEqual(self._word(image, 4), 0)  # the pair is gone
@@ -196,7 +196,7 @@ class TestRelaxation(unittest.TestCase):
         )
         obj_b = "SEC .text\n00 00 00 00\nSYM f G .text 0\n"
         image, symaddr, layout = link_texts(obj_a, obj_b)
-        self.assertEqual(self._word(image, 0) >> 25, 0x0E)  # folded
+        self.assertEqual(self._word(image, 0) >> 25, 0x0C)  # folded pcaddi
         self.assertEqual(layout.got, {})  # slot died with the pair
         self.assertEqual((self._word(image, 0) >> 5) & 0xFFFFF, (symaddr["f"] - ll.BASE) >> 2)
 

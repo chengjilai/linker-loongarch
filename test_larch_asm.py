@@ -49,7 +49,9 @@ class TestRoundTrip(unittest.TestCase):
         ("ori", "r4, r4, 0xfff", ("ori", 4, 4, 31, 0xFFF)),
         ("andi", "r0, r0, 0", ("andi", 0, 0, 0, 0)),  # NOP
         ("lu12i.w", "r12, 0x12345", ("lu12i.w", 12, 0, 0, 0x12345)),
+        ("pcaddi", "r4, 0x7ffff", ("pcaddi", 4, 0, 0, 0x7FFFF)),
         ("pcalau12i", "r13, 0x7ffff", ("pcalau12i", 13, 0, 0, 0x7FFFF)),
+        ("pcaddu12i", "r5, -1", ("pcaddu12i", 5, 0, 0, -1)),
         ("ld.d", "r4, r12, 0", ("ld.d", 4, 12, 0, 0)),
         ("ld.w", "r5, r6, 12", ("ld.w", 5, 6, 12, 12)),
         ("st.d", "r4, r12, 8", ("st.d", 4, 12, 8, 8)),
@@ -70,6 +72,16 @@ class TestRoundTrip(unittest.TestCase):
             got = emu.decode(int.from_bytes(word, "little"))
             self.assertIsNotNone(got, f"{mnem} {ops} did not decode")
             self.assertEqual(got, want, f"{mnem} {ops}")
+
+    def test_golden_7bit_encodings(self):
+        # Ground truth from QEMU target/loongarch/insns.decode and lld:
+        # pcaddi 0001_100, pcalau12i 0001_101, pcaddu12i 0001_110.
+        word, _ = enc("pcaddi", "r4, 0")
+        self.assertEqual(int.from_bytes(word, "little"), 0x18000004)
+        word, _ = enc("pcalau12i", "r4, 0")
+        self.assertEqual(int.from_bytes(word, "little"), 0x1A000004)
+        word, _ = enc("pcaddu12i", "r4, 0")
+        self.assertEqual(int.from_bytes(word, "little"), 0x1C000004)
 
     def test_register_aliases(self):
         word, _ = enc("addi.d", "sp, sp, 0")

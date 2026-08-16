@@ -25,7 +25,7 @@ Opcodes (Appendix B):
   10-bit: slti=0x08 sltui=0x09 addi.w=0x0A addi.d=0x0B andi=0x0D ori=0x0E
           ld.w=0xA2 ld.d=0xA3 st.w=0xA6 st.d=0xA7
   17-bit: add.d=0x21 sub.d=0x23 slt=0x24 sltu=0x25 and=0x29 or=0x2A xor=0x2B
-  7-bit:  lu12i.w=0x0A pcalau12i=0x0D
+  7-bit:  lu12i.w=0x0A pcaddi=0x0C pcalau12i=0x0D pcaddu12i=0x0E
 
 (Cross-checked against qemu target/loongarch/insns.decode -- identical.)
 
@@ -45,7 +45,7 @@ import contextlib
 import io
 import unittest
 
-from larch_emu import LA64, run, trace
+from larch_emu import LA64, decode, run, trace
 
 # ---------------------------------------------------------------------------
 # Independent encoders (doc-derived bit layouts, MSB first)
@@ -53,7 +53,9 @@ from larch_emu import LA64, run, trace
 OP = {
     # 7-bit opcodes
     "lu12i.w": 0x0A,
+    "pcaddi": 0x0C,
     "pcalau12i": 0x0D,
+    "pcaddu12i": 0x0E,
     # 10-bit opcodes
     "slti": 0x08,
     "sltui": 0x09,
@@ -139,6 +141,19 @@ def prog_pcalau12i():
     # pcalau12i r4, 0x10 -> (0x10 + 0x10000) & ~0xfff = 0x10000
     # ori r4, r4, 0x2ff  -> 0x102ff
     return prog(NOP, NOP, NOP, NOP, ri20(OP["pcalau12i"], 0x10, 4), ri12(OP["ori"], 0x2FF, 4, 4))
+
+
+def prog_pcaddi():
+    # nop x4, then pcaddi r4, 0x10 at pc=0x10:
+    # GR[rd] = PC + SignExtend({si20, 2'b0}) -> 0x10 + 0x40 = 0x50
+    return prog(NOP, NOP, NOP, NOP, ri20(OP["pcaddi"], 0x10, 4), NOP)
+
+
+def prog_pcaddu12i():
+    # nop x4, then pcaddu12i r4, 0x10 at pc=0x10:
+    # GR[rd] = PC + SignExtend({si20, 12'b0}) -> 0x10 + 0x10000 = 0x10010
+    # (full PC; unlike pcalau12i the low 12 bits are not erased)
+    return prog(NOP, NOP, NOP, NOP, ri20(OP["pcaddu12i"], 0x10, 4), NOP)
 
 
 def prog_branches():
@@ -343,6 +358,19 @@ class TestRun(unittest.TestCase):
 
     def test_pcalau12i_ori_constant(self):
         self.assertEqual(run(prog_pcalau12i(), 0), 0x102FF)
+
+    def test_pcaddi_pc_relative(self):
+        self.assertEqual(run(prog_pcaddi(), 0), 0x50)
+
+    def test_pcaddu12i_full_pc(self):
+        self.assertEqual(run(prog_pcaddu12i(), 0), 0x10010)
+
+    def test_golden_7bit_decodes(self):
+        # Ground truth: pcaddi 0001_100, pcalau12i 0001_101,
+        # pcaddu12i 0001_110 (QEMU insns.decode; lld's opcode bases).
+        self.assertEqual(decode(0x18000004), ("pcaddi", 4, 0, 0, 0))
+        self.assertEqual(decode(0x1A000004), ("pcalau12i", 4, 0, 0, 0))
+        self.assertEqual(decode(0x1C000004), ("pcaddu12i", 4, 0, 0, 0))
 
     def test_branches_beq_bne_blt(self):
         self.assertEqual(run(prog_branches(), 0), 4)

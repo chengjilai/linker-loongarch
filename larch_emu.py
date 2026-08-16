@@ -87,7 +87,9 @@ OP17 = {
     0x2A: "or",
     0x2B: "xor",
 }
-OP7 = {0x0A: "lu12i.w", 0x0C: "pcaddu12i", 0x0D: "pcalau12i", 0x0E: "pcaddi"}
+# 7-bit opcodes, QEMU target/loongarch/insns.decode / lld:
+#   pcaddi 0x0C, pcalau12i 0x0D, pcaddu12i 0x0E
+OP7 = {0x0A: "lu12i.w", 0x0C: "pcaddi", 0x0D: "pcalau12i", 0x0E: "pcaddu12i"}
 
 # instructions whose immediate is zero-extended (the manual: ui12)
 UNSIGNED_IMM = frozenset(("andi", "ori"))
@@ -247,6 +249,14 @@ class LA64:
             v = ((pc + (imm << 12)) & MASK64) & ~0xFFF  # low 12 bits erased
             write(rd, v)
             effect = f"r{rd} <- 0x{v:x}"
+
+        elif mnem == "pcaddu12i":
+            # Vol1 2.2.1.7: GR[rd] = PC + SignExtend({si20, 12'b0}, GRLEN)
+            # (full PC; unlike PCALAU12I the low 12 bits are NOT erased)
+            v = (pc + (imm << 12)) & MASK64
+            write(rd, v)
+            effect = f"r{rd} <- 0x{v:x}"
+
         elif mnem == "pcaddi":
             # Vol1 2.2.1.8: GR[rd] = PC + SignExtend({si20, 2'b0}) — the
             # relaxed-form instruction lld emits for pcalau12i+addi.d pairs
@@ -328,7 +338,7 @@ class LA64:
             return f"r{rd}, r{rj}, {imm}"
         if mnem in ("ld.w", "ld.d", "st.w", "st.d"):
             return f"r{rd}, r{rj}, {imm}"
-        if mnem in ("lu12i.w", "pcalau12i"):
+        if mnem in ("lu12i.w", "pcalau12i", "pcaddi", "pcaddu12i"):
             return f"r{rd}, 0x{imm:x}"
         return f"r{rd}, r{rj}, r{rk}"
 

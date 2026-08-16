@@ -144,9 +144,10 @@ import larch_emu  # the emulator; see the run() contract in the docstring
 BASE, ALIGN, MASK = 0x400000, 16, 0xFFFFFFFFFFFFFFFF  # base, align, 64-bit
 
 # opcode bases, binutils opcodes/loongarch-opc.c (verbatim):
-#   pcalau12i 0x1a000000, pcaddu12i 0x1c000000, ld.d 0x28c00000,
-#   jirl 0x4c000000, nop 0x03400000
-OP_PCALAU12I, OP_PCADDU12I, OP_LD_D = 0x1A000000, 0x1C000000, 0x28C00000
+#   pcaddi 0x18000000, pcalau12i 0x1a000000, pcaddu12i 0x1c000000,
+#   ld.d 0x28c00000, jirl 0x4c000000, nop 0x03400000
+OP_PCADDI, OP_PCALAU12I = 0x18000000, 0x1A000000
+OP_PCADDU12I, OP_LD_D = 0x1C000000, 0x28C00000
 OP_JIRL, OP_NOP = 0x4C000000, 0x03400000
 
 
@@ -339,7 +340,7 @@ def _apply_relax(o, sec, roff):
     data = o.sections[sec]
     word = int.from_bytes(data[roff : roff + 4], "little")  # the LO12 instruction
     rd = word & 0x1F
-    relaxed = 0x0E << 25 | rd  # pcaddi, si20 = 0
+    relaxed = OP_PCADDI | rd  # pcaddi, si20 = 0 (0x0C << 25, not pcaddu12i)
     data[roff - 4 : roff + 4] = relaxed.to_bytes(4, "little")
     # both PCALA and GOT folds target the symbol's own address (lld's
     # relaxPCHi20Lo12 computes dest = sym->getVA(); the GOT slot is only

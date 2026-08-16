@@ -108,11 +108,12 @@ ENC = {
     "and": (0x29, 17, "rd_rj_rk"),
     "or": (0x2A, 17, "rd_rj_rk"),
     "xor": (0x2B, 17, "rd_rj_rk"),
-    # 7-bit opcodes
+    # 7-bit opcodes (QEMU target/loongarch/insns.decode; lld):
+    #   pcaddi 0x0C, pcalau12i 0x0D, pcaddu12i 0x0E
     "lu12i.w": (0x0A, 7, "rd_imm20"),
-    "pcaddu12i": (0x0C, 7, "rd_imm20"),
+    "pcaddi": (0x0C, 7, "rd_imm20"),
     "pcalau12i": (0x0D, 7, "rd_imm20"),
-    "pcaddi": (0x0E, 7, "rd_imm20"),
+    "pcaddu12i": (0x0E, 7, "rd_imm20"),
 }
 
 EXPECTED_A0 = 6  # the toolchain demo's emulated result
@@ -197,7 +198,7 @@ def encode_instruction(
         # bits [25:10] = field[15:0], bits [9:0] = field[25:16]
         return emit_word(op << 26 | ((field & 0xFFFF) << 10) | ((field >> 16) & 0x3FF)), relocs
 
-    if kind == "rd_imm20":  # lu12i.w/pcalau12i
+    if kind == "rd_imm20":  # lu12i.w/pcaddi/pcalau12i/pcaddu12i
         rd, imm = ops
         rd = _reg(rd, where)
         m = RELOC_SUFFIX.match(imm)
